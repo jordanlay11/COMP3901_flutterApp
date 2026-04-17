@@ -3,60 +3,71 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 class BleService {
-  void startScan(Function(Map<String, dynamic>) onDeviceFound) async {
-    await requestPermissions(); // permissions
-    print("🔍 Starting BLE scan...");
+  final Set<String> _seenDevices = {};
+  bool _isScanning = false;
 
-    // Start scan
+  bool get isScanning => _isScanning;
+
+  // 🔐 Request permissions
+  Future<void> _requestPermissions() async {
+    await [
+      Permission.location,
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+    ].request();
+  }
+
+  // 🔍 Start scanning
+  Future<void> startScan(Function(Map<String, dynamic>) onDeviceFound) async {
+    if (_isScanning) return;
+
+    await _requestPermissions();
+
+    _seenDevices.clear();
+    _isScanning = true;
+
     await FlutterBluePlus.startScan(
       timeout: const Duration(seconds: 10),
     );
 
-    // Listen to results
     FlutterBluePlus.scanResults.listen((results) {
       for (ScanResult r in results) {
-        final name = r.device.platformName;
+        final deviceId = r.device.remoteId.str;
 
-         print("📡 Found device: $name");
-        if (name.contains("MESH_NODE")) {
-          print("📡 Found mesh device: $name");
+        // 🚫 Skip duplicates
+        if (_seenDevices.contains(deviceId)) continue;
+        _seenDevices.add(deviceId);
 
-          try {
-            final manufacturerData = r.advertisementData.manufacturerData;
+        final adv = r.advertisementData;
 
-            if (manufacturerData.isNotEmpty) {
-              final bytes = manufacturerData.values.first;
-              final decoded = utf8.decode(bytes);
-              final jsonData = jsonDecode(decoded);
+        // 🔍 Only process devices with manufacturer data
+        if (adv.manufacturerData.isEmpty) continue;
 
-              print("📦 Data: $jsonData");
+        try {
+          final bytes = adv.manufacturerData.values.first;
+          final decoded = utf8.decode(bytes);
+          final data = jsonDecode(decoded);
 
-              onDeviceFound(jsonData);
-            }
-          } catch (e) {
-            print("❌ Parse error: $e");
+          // ✅ Validate mesh payload
+          if (data is Map<String, dynamic> &&
+              data.containsKey("ip") &&
+              data.containsKey("p")) {
+            onDeviceFound(data);
           }
+        } catch (_) {
+          // Ignore non-mesh devices silently
         }
       }
     });
   }
 
-  void stopScan() {
-    FlutterBluePlus.stopScan();
-    print("🛑 Scan stopped");
+  // 🛑 Stop scanning
+  Future<void> stopScan() async {
+    if (!_isScanning) return;
+
+    await FlutterBluePlus.stopScan();
+    _isScanning = false;
   }
-}
-
-Future<void> requestPermissions() async {
-  print("🔐 Requesting permissions...");
-
-  await [
-    Permission.location,
-    Permission.bluetoothScan,
-    Permission.bluetoothConnect,
-  ].request();
-
-  print("✅ Permissions requested");
 }
 
 final bleService = BleService();

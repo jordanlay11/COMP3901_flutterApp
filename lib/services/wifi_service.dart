@@ -1,92 +1,220 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:http/http.dart' as http;
 
 class WifiService {
-  ServerSocket? server;
-  List<Socket> clients = [];
-  Set<String> seenMessages = {};
+  ServerSocket? _server;
+  final List<Socket> _clients = [];
+
+  final Set<String> _seenMessages = {};
+  final Set<String> _connectedIPs = {};
+
+  final List<Map<String, dynamic>> _messageQueue = [];
+  final List<Map<String, dynamic>> _localStorage = [];
+
+  bool _serverRunning = false;
+  bool _isOnline = false;
+
+  final int MAX_HOPS = 5;
+
+  bool get isServerRunning => _serverRunning;
+
+  WifiService() {
+    _monitorInternet();
+  }
+
+  // 🌐 Monitor internet
+  void _monitorInternet() {
+    Connectivity().onConnectivityChanged.listen((result) {
+      final nowOnline = result != ConnectivityResult.none;
+
+      if (nowOnline && !_isOnline) {
+        _isOnline = true;
+        _uploadStoredMessages();
+      } else if (!nowOnline) {
+        _isOnline = false;
+      }
+    });
+  }
 
   // 🚀 Start server
   Future<void> startServer(Function(String) onMessage) async {
+    if (_serverRunning) return;
+
     try {
-      server = await ServerSocket.bind(InternetAddress.anyIPv4, 8080);
-      print("🚀 Server started on port 8080");
+      _server = await ServerSocket.bind(InternetAddress.anyIPv4, 8080);
+      _serverRunning = true;
 
-      server!.listen((socket) {
-        print("🟢 Client connected: ${socket.remoteAddress}");
+      _server!.listen((socket) {
+        final ip = socket.remoteAddress.address;
 
-        clients.add(socket);
+        _clients.add(socket);
+        _connectedIPs.add(ip);
+
+        _flushQueue();
 
         socket.listen((data) {
           final msgStr = utf8.decode(data);
 
           try {
             final msg = jsonDecode(msgStr);
+            final id = msg["id"];
 
-            if (seenMessages.contains(msg["id"])) {
-              print("♻️ Duplicate ignored");
-              return;
-            }
+            if (_seenMessages.contains(id)) return;
+            _seenMessages.add(id);
 
-            seenMessages.add(msg["id"]);
+            int hop = msg["hopCount"] ?? 0;
+            if (hop >= MAX_HOPS) return;
 
-            print("📥 Received: ${msg["text"]}");
+            // 💾 Store locally
+            _storeMessage(msg);
 
-            onMessage(msg["text"]);
+            final text = msg["text"];
+            onMessage("$text (hop: $hop)");
 
-            // 🔁 Relay
-            for (var c in clients) {
+            msg["hopCount"] = hop + 1;
+            final updated = jsonEncode(msg);
+
+            for (var c in _clients) {
               if (c != socket) {
-                c.write(msgStr);
+                c.write(updated);
               }
             }
-          } catch (e) {
-            print("❌ Parse error: $e");
-          }
+          } catch (_) {}
         });
 
         socket.done.then((_) {
-          print("🔴 Client disconnected");
-          clients.remove(socket);
+          _clients.remove(socket);
+          _connectedIPs.remove(ip);
         });
       });
-    } catch (e) {
-      print("❌ Server error: $e");
-    }
+    } catch (_) {}
   }
 
   // 🔗 Connect
-  Future<void> connect(String ip) async {
-    try {
-      print("🔗 Connecting to $ip...");
+  Future<void> connect(String ip, Function(String)? onConnected) async {
+    if (_connectedIPs.contains(ip)) return;
 
+    try {
       final socket = await Socket.connect(ip, 8080);
 
-      clients.add(socket);
+      _clients.add(socket);
+      _connectedIPs.add(ip);
 
-      print("✅ Connected to $ip");
+      if (onConnected != null) {
+        onConnected(ip);
+      }
+
+      _flushQueue();
 
       socket.listen((data) {
-        final msg = utf8.decode(data);
-        print("📥 Received (client): $msg");
+        final msgStr = utf8.decode(data);
+
+        try {
+          final msg = jsonDecode(msgStr);
+          final id = msg["id"];
+
+          if (_seenMessages.contains(id)) return;
+          _seenMessages.add(id);
+
+          int hop = msg["hopCount"] ?? 0;
+          if (hop >= MAX_HOPS) return;
+
+          // 💾 Store locally
+          _storeMessage(msg);
+
+          msg["hopCount"] = hop + 1;
+          final updated = jsonEncode(msg);
+
+          for (var c in _clients) {
+            if (c != socket) {
+              c.write(updated);
+            }
+          }
+        } catch (_) {}
       });
-    } catch (e) {
-      print("❌ Connection error: $e");
-    }
+    } catch (_) {}
   }
 
   // 📤 Send message
-  void sendMessage(String text) {
-    final msg = jsonEncode({
+  void sendMessage(String text, String origin) {
+    final msg = {
       "id": DateTime.now().millisecondsSinceEpoch.toString(),
       "text": text,
-    });
+      "origin": origin,
+      "hopCount": 0,
+      "uploaded": false,
+    };
 
-    print("📤 Sending: $text");
+    _storeMessage(msg);
 
-    for (var c in clients) {
-      c.write(msg);
+    if (_clients.isEmpty) {
+      _messageQueue.add(msg);
+      return;
     }
+
+    final encoded = jsonEncode(msg);
+
+    for (var c in _clients) {
+      c.write(encoded);
+    }
+  }
+
+  // 💾 Store message locally
+  void _storeMessage(Map<String, dynamic> msg) {
+    final exists =
+        _localStorage.any((m) => m["id"] == msg["id"]);
+
+    if (!exists) {
+      _localStorage.add(msg);
+    }
+  }
+
+  // 🔁 Flush queued messages
+  void _flushQueue() {
+    if (_clients.isEmpty || _messageQueue.isEmpty) return;
+
+    for (var msg in _messageQueue) {
+      final encoded = jsonEncode(msg);
+
+      for (var c in _clients) {
+        c.write(encoded);
+      }
+    }
+
+    _messageQueue.clear();
+  }
+
+  // 🌐 Upload messages
+  Future<void> _uploadStoredMessages() async {
+    for (var msg in _localStorage) {
+      if (msg["uploaded"] == true) continue;
+
+      try {
+        // 🔥 Replace with YOUR backend URL
+        final response = await http.post(
+          Uri.parse("https://your-server.com/api/report"),
+          headers: {"Content-Type": "application/json"},
+          body: jsonEncode(msg),
+        );
+
+        if (response.statusCode == 200) {
+          msg["uploaded"] = true;
+        }
+      } catch (_) {}
+    }
+  }
+
+  // 🛑 Stop server
+  Future<void> stopServer() async {
+    await _server?.close();
+    _serverRunning = false;
+    _clients.clear();
+    _connectedIPs.clear();
+    _seenMessages.clear();
+    _messageQueue.clear();
+    _localStorage.clear();
   }
 }
 

@@ -1,20 +1,35 @@
 import 'dart:convert';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 import 'package:network_info_plus/network_info_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class BleAdvertising {
-  final flutterBlePeripheral = FlutterBlePeripheral();
+  final FlutterBlePeripheral _blePeripheral = FlutterBlePeripheral();
+  bool _isAdvertising = false;
 
-  Future<void> startAdvertising() async {
+  bool get isAdvertising => _isAdvertising;
+
+  // 🔐 Permissions
+  Future<void> _requestPermissions() async {
+    await [
+      Permission.location,
+      Permission.bluetoothAdvertise,
+      Permission.bluetoothConnect,
+    ].request();
+  }
+
+  // 📢 Start advertising
+  Future<void> startAdvertising(Function(String) onStatus) async {
+    if (_isAdvertising) return;
+
+    await _requestPermissions();
+
     try {
-      print("📢 Starting BLE advertising...");
-
-      // Get local IP
       final info = NetworkInfo();
       final ip = await info.getWifiIP();
 
       if (ip == null) {
-        print("❌ No IP found");
+        onStatus("No IP found");
         return;
       }
 
@@ -23,27 +38,30 @@ class BleAdvertising {
         "p": 8080,
       });
 
-      print("📦 Advertising payload: $payload");
-
       final advertiseData = AdvertiseData(
         serviceUuid: "12345678-1234-1234-1234-123456789abc",
         manufacturerId: 1234,
         manufacturerData: utf8.encode(payload),
+        includeDeviceName: true,
       );
 
-      await flutterBlePeripheral.start(
-        advertiseData: advertiseData,
-      );
+      await _blePeripheral.start(advertiseData: advertiseData);
 
-      print("✅ Advertising started");
-    } catch (e) {
-      print("❌ Advertising error: $e");
+      _isAdvertising = true;
+      onStatus("Advertising");
+    } catch (_) {
+      onStatus("Advertising failed");
     }
   }
 
-  Future<void> stopAdvertising() async {
-    await flutterBlePeripheral.stop();
-    print("🛑 Advertising stopped");
+  // 🛑 Stop advertising
+  Future<void> stopAdvertising(Function(String) onStatus) async {
+    if (!_isAdvertising) return;
+
+    await _blePeripheral.stop();
+    _isAdvertising = false;
+
+    onStatus("Advertising stopped");
   }
 }
 
