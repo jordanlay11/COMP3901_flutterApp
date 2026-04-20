@@ -9,7 +9,11 @@ import os
 from functools import wraps
 from werkzeug.utils import secure_filename
 import exifread
+import bcrypt
 from db import get_db_connection
+
+
+processed_message= set()
 
 
 app = Flask(__name__)
@@ -49,28 +53,87 @@ def extract_gps(file_path):
 
 @app.route('/auth/login', methods=['POST'])
 def login():
-    data = request.get_json()
+    data = request.get_json() or {}
     
-    if data["user_email"] == "john@example.com" and data["password"] == "password123":
+    email = data.get("email")
+    password = data.get("password")
+
+    if not email or not password:
+        return jsonify({'message': 'Missing credentials.'}), 400
+    
+    con = get_db_connection()
+    cur = con.cursor()
+
+    try:
+        cur.execute("SELECT userID, email, pass FROM users WHERE email=%s", (email,))
+        user = cur.fetchone()
+
+        if not user:
+            return jsonify({'message': 'Invalid credentials.'}), 401
+
+        user_id, user_email, password_hash = user
+
+        stored_hash = password_hash.encode('utf-8') if isinstance(password_hash, str) else password_hash
+        if not bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+            return jsonify({'message': 'Invalid credentials.'}), 401
+        
         token = jwt.encode({
-            "user_id": "123",
-            "email": data["user_email"],
-                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=2)
-            }, JWT_SECRET, algorithm="HS256")
+            "user_id": str(user_id),
+            "email": user_email,
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+        }, JWT_SECRET, algorithm="HS256")
 
         return jsonify({'token': token})
-            
-    return jsonify({'message': "Invalid credentials"}), 401
+    except Exception as e:
+        print("Login error:", e)
+        return jsonify({'message': 'An error occurred during login.'}), 500
+    finally:
+        cur.close()
+        con.close()
 
+@app.route('/auth/register', methods=['POST'])
+def register():
+    data = request.get_json() or {}
+    
+    email = data.get("email")
+    password = data.get("password")
+    username = data.get("userName")
+
+
+    if not email or not password or not username:
+        return jsonify({'message': 'Missing credentials.'}), 400
+    
+    hashedPassword = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("INSERT INTO users (userName, email, pass) VALUES (%s, %s, %s) returning userID", (username, email, hashedPassword))
+
+        conn.commit()
+        return jsonify({'message': 'User registered successfully.'}), 201
+    
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'message': 'User already exists.'}), 400
+        
+    finally:
+        cur.close()
+        conn.close()
+
+        
 @app.route("/report", methods=["POST"])
 @token_required
 def create_report():
-    data = request.json
+    data = request.json or {}
 
     required = ["report_type", "latitude", "longitude", "urgency_level", "sent_mode"]
 
     if not all(field in data for field in required):
         return jsonify({"error": "Missing fields"}), 400
+    
+    report_type = data["report_type"].upper()
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -83,7 +146,7 @@ def create_report():
             RETURNING *
         """, (
             request.user["user_id"],
-            data["report_type"],
+            report_type,
             data.get("description"),
             data["latitude"],
             data["longitude"],
@@ -155,7 +218,13 @@ def get_userreports():
     cur.execute("""
         SELECT * FROM emergencyReports
         WHERE userID = %s
-        ORDER BY created_at DESC
+        ORDER BY
+            CASE urgency_level
+                WHEN 'HIGH' THEN 1
+                WHEN 'MEDIUM' THEN 2
+                ELSE 3
+            END,
+            created_at DESC
     """, (request.user["user_id"],))
 
     data = cur.fetchall()
@@ -170,7 +239,7 @@ def get_userreports():
 @app.route("/status/<reportID>", methods=["PUT"])
 @token_required
 def update_status(reportID):
-    data = request.json
+    data = request.json or {}
     status = data.get("status")
 
     if status not in ["PENDING", "IN_PROGRESS", "RESOLVED"]:
@@ -229,7 +298,7 @@ def delete_report(reportID):
 @app.route("/sync", methods=["POST"])
 @token_required
 def sync():
-    data = request.json
+    data = request.json or {}
     reports = data.get("reports", [])
 
     conn = get_db_connection()
@@ -239,11 +308,20 @@ def sync():
 
     for r in reports:
         try:
+            if r.get("ttl", 1) <= 0:
+                continue
+
+            if r["reportID"] in processed_message:
+                results["duplicates"] += 1
+                continue
+
             cur.execute("SELECT reportID FROM emergencyReports WHERE reportID=%s", (r["reportID"],))
 
             if cur.fetchone():
                 results["duplicates"] += 1
                 continue
+
+            report_type = r["report_type"].upper()
 
             cur.execute("""
                 INSERT INTO emergencyReports
@@ -252,17 +330,21 @@ def sync():
             """, (
                 r["reportID"],
                 request.user["user_id"],
-                r["report_type"],
+                report_type,
                 r["description"],
                 r["latitude"],
                 r["longitude"],
                 r["urgency_level"],
                 r["sent_mode"],
                 r["created_at"]
+
             ))
+            processed_message.add(r["reportID"])
 
             results["saved"] += 1
 
+            
+           
         except Exception as e:
             print("Sync error:", e)
             results["errors"] += 1
@@ -275,9 +357,17 @@ def sync():
 
 @app.route("/alerts", methods=["GET"])
 def alerts():
-    return jsonify([
-        {"id": 1, "message": "Hurricane Warning", "level": "HIGH"}
-    ])
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM alerts ORDER BY created_at DESC")
+
+    data = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return jsonify({"alerts": data})
 
 @app.route('/protected', methods=['GET'])
 @token_required
@@ -287,9 +377,35 @@ def protected():
 @app.route('/mesh/upload', methods=['POST'])
 @token_required
 def upload_mesh():
-    message = request.get_json()
+    data = request.get_json() or {}
+    messages = data.get("messages", [])
 
-    return jsonify({'message': 'Mesh uploaded successfully.', 'user': request.user}) 
+    request._cached_json = {"reports": messages}
+    return sync()
 
+@app.route("/mesh/download", methods=["GET"])
+@token_required
+def download_mesh():
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT * FROM emergencyReports
+        WHERE created_at > NOW() - INTERVAL '1 hour'
+        ORDER BY
+            CASE urgency_level
+                WHEN 'HIGH' THEN 1
+                WHEN 'MEDIUM' THEN 2
+                ELSE 3
+            END,
+            created_at DESC
+    """)
+
+    data = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return jsonify({"reports": data})
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

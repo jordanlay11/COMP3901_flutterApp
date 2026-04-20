@@ -65,3 +65,10 @@ CREATE TABLE reportPhotos (
     uploaded_at  TIMESTAMP    DEFAULT NOW()
 );
 
+CREATE TABLE alerts (
+    alertID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    message TEXT,
+    level VARCHAR(20),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
