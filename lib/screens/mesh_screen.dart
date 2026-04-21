@@ -12,61 +12,93 @@ class _MeshScreenState extends State<MeshScreen> {
   List<String> foundDevices = [];
   List<String> connectedDevices = [];
   List<String> messages = [];
+  List<String> logs = [];
 
   String status = "Idle";
   String messageInput = "";
 
-  // 🔍 Scan
-  void startScan() async {
+  bool meshStarted = false;
+
+  // 🚀 START FULL MESH
+  void startMesh() async {
+    if (meshStarted) return;
+
+    meshStarted = true;
+
     setState(() {
-      status = "Scanning...";
+      status = "Starting mesh...";
+      logs.clear();
+      foundDevices.clear();
+      connectedDevices.clear();
     });
 
-    await bleService.startScan((data) {
-      final ip = data["ip"];
-
-      if (ip != null && !foundDevices.contains(ip)) {
+    await wifiService.startMesh(
+      onMessage: (msg) {
         setState(() {
-          foundDevices.add(ip);
+          messages.add("📥 $msg");
         });
-      }
+      },
 
-      if (ip != null) {
-        wifiService.connect(ip, (connectedIp) {
-          if (!connectedDevices.contains(connectedIp)) {
+      onStatus: (msg) {
+        setState(() {
+          status = msg;
+          logs.add(msg);
+        });
+      },
+
+      onDeviceFound: (data) {
+        final ip = data["ip"];
+
+        if (ip != null && !foundDevices.contains(ip)) {
+          setState(() {
+            foundDevices.add(ip);
+          });
+        }
+      },
+
+      startAdvertising: () {
+        bleAdvertising.startAdvertising((msg) {
+          setState(() {
+            logs.add("📢 $msg");
+          });
+        });
+      },
+
+      startScan: (callback) {
+        bleService.startScan((data) {
+          final ip = data["ip"];
+
+          if (ip != null && !foundDevices.contains(ip)) {
             setState(() {
-              connectedDevices.add(connectedIp);
+              foundDevices.add(ip);
             });
           }
+
+          callback(data);
+
+          // Track connections visually
+          if (ip != null) {
+            wifiService.connect(
+              ip,
+              (connectedIp) {
+                if (!connectedDevices.contains(connectedIp)) {
+                  setState(() {
+                    connectedDevices.add(connectedIp);
+                  });
+                }
+              },
+              (msg) {
+                setState(() {
+                  messages.add("📥 $msg");
+                });
+              },
+            );
+          }
+
+
         });
-      }
-    });
-
-    setState(() {
-      status = "Scan complete";
-    });
-  }
-
-  // 📢 Advertise
-  void startAdvertising() {
-    bleAdvertising.startAdvertising((msg) {
-      setState(() {
-        status = msg;
-      });
-    });
-  }
-
-  // 🚀 Server
-  void startServer() {
-    wifiService.startServer((msg) {
-      setState(() {
-        messages.add("📥 $msg");
-      });
-    });
-
-    setState(() {
-      status = "Server running";
-    });
+      },
+    );
   }
 
   // 📤 Send message
@@ -89,23 +121,10 @@ class _MeshScreenState extends State<MeshScreen> {
         padding: const EdgeInsets.all(10),
         child: Column(
           children: [
-            // 🔘 Buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton(
-                  onPressed: startAdvertising,
-                  child: Text("Advertise"),
-                ),
-                ElevatedButton(
-                  onPressed: startScan,
-                  child: Text("Scan"),
-                ),
-                ElevatedButton(
-                  onPressed: startServer,
-                  child: Text("Server"),
-                ),
-              ],
+            // 🚀 Start Mesh Button
+            ElevatedButton(
+              onPressed: startMesh,
+              child: Text("Start Mesh"),
             ),
 
             SizedBox(height: 10),
@@ -146,6 +165,20 @@ class _MeshScreenState extends State<MeshScreen> {
               child: ListView.builder(
                 itemCount: messages.length,
                 itemBuilder: (_, i) => Text(messages[i]),
+              ),
+            ),
+
+            Divider(),
+
+            // 📜 Logs (NEW — helps debugging mesh behavior)
+            SizedBox(
+              height: 100,
+              child: ListView.builder(
+                itemCount: logs.length,
+                itemBuilder: (_, i) => Text(
+                  logs[i],
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
               ),
             ),
 

@@ -16,6 +16,12 @@ class WifiService {
   bool _serverRunning = false;
   bool _isOnline = false;
 
+  bool isHost = false;
+  bool meshStarted = false;
+  bool hasConnections() {
+  return _clients.isNotEmpty;
+}
+
   final int MAX_HOPS = 5;
 
   bool get isServerRunning => _serverRunning;
@@ -37,6 +43,61 @@ class WifiService {
       }
     });
   }
+
+  // Start mesh
+  Future<void> startMesh({
+  required Function(String) onMessage,
+  required Function(String) onStatus,
+  required Function(Map<String, dynamic>) onDeviceFound,
+  required Function startAdvertising,
+  required Function startScan,
+}) async {
+  if (meshStarted) return;
+  meshStarted = true;
+
+  onStatus("🚀 Starting mesh...");
+
+  // 1️⃣ Start server (your existing logic)
+  await startServer(onMessage);
+
+  // 2️⃣ Start BLE advertising
+  startAdvertising();
+  onStatus("📡 Advertising started");
+
+  // 3️⃣ Start scanning → AUTO CONNECT 
+  startScan((data) {
+    final ip = data["ip"];
+    final port = data["p"];
+
+    onStatus("🔍 Found device: $ip");
+
+    if (ip != null) {
+    connect(
+      ip,
+      (connectedIp) {
+        onStatus("✅ Connected to $connectedIp");
+      },
+      (msg) {
+        onStatus("📥 $msg");
+      },
+    );
+  }
+  });
+
+  // 4️⃣ Wait to discover peers
+  await Future.delayed(const Duration(seconds: 6));
+
+  // 5️⃣ Decide role
+  if (!hasConnections()) {
+    isHost = true;
+
+    onStatus("⚠️ No peers found");
+    onStatus("📶 Enable hotspot to become mesh host");
+  } else {
+    isHost = false;
+    onStatus("🟢 Connected to mesh (client mode)");
+  }
+}
 
   // 🚀 Start server
   Future<void> startServer(Function(String) onMessage) async {
@@ -93,49 +154,56 @@ class WifiService {
   }
 
   // 🔗 Connect
-  Future<void> connect(String ip, Function(String)? onConnected) async {
-    if (_connectedIPs.contains(ip)) return;
+  Future<void> connect(String ip, Function(String)? onConnected, Function(String)? onMessage) async {
+  if (_connectedIPs.contains(ip)) return;
 
-    try {
-      final socket = await Socket.connect(ip, 8080);
+  try {
+    final socket = await Socket.connect(ip, 8080);
 
-      _clients.add(socket);
-      _connectedIPs.add(ip);
+    _clients.add(socket);
+    _connectedIPs.add(ip);
 
-      if (onConnected != null) {
-        onConnected(ip);
-      }
+    if (onConnected != null) {
+      onConnected(ip);
+    }
 
-      _flushQueue();
+    _flushQueue();
 
-      socket.listen((data) {
-        final msgStr = utf8.decode(data);
+    socket.listen((data) {
+      final msgStr = utf8.decode(data);
 
-        try {
-          final msg = jsonDecode(msgStr);
-          final id = msg["id"];
+      try {
+        final msg = jsonDecode(msgStr);
+        final id = msg["id"];
 
-          if (_seenMessages.contains(id)) return;
-          _seenMessages.add(id);
+        if (_seenMessages.contains(id)) return;
+        _seenMessages.add(id);
 
-          int hop = msg["hopCount"] ?? 0;
-          if (hop >= MAX_HOPS) return;
+        int hop = msg["hopCount"] ?? 0;
+        if (hop >= MAX_HOPS) return;
 
-          // 💾 Store locally
-          _storeMessage(msg);
+        // 💾 Store locally
+        _storeMessage(msg);
 
-          msg["hopCount"] = hop + 1;
-          final updated = jsonEncode(msg);
+        // ✅ 🔥 ADD THIS LINE
+        if (onMessage != null) {
+          final text = msg["text"];
+          onMessage("$text (hop: $hop)");
+        }
 
-          for (var c in _clients) {
-            if (c != socket) {
-              c.write(updated);
-            }
+        msg["hopCount"] = hop + 1;
+        final updated = jsonEncode(msg);
+
+        for (var c in _clients) {
+          if (c != socket) {
+            c.write(updated);
           }
-        } catch (_) {}
-      });
-    } catch (_) {}
-  }
+        }
+      } catch (_) {}
+    });
+  } catch (_) {}
+}
+
 
   // 📤 Send message
   void sendMessage(String text, String origin) {
