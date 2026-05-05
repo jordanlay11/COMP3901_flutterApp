@@ -111,8 +111,18 @@ def register():
     try:
         cur.execute("INSERT INTO users (userName, email, pass) VALUES (%s, %s, %s) returning userID", (username, email, hashedPassword))
 
+        user = cur.fetchone()
         conn.commit()
-        return jsonify({'message': 'User registered successfully.'}), 201
+        token = jwt.encode({
+            "user_id": str(user[0]),
+            "email":   user[1],
+            'exp':     datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+        }, JWT_SECRET, algorithm="HS256")
+
+        return jsonify({
+            'message': 'User registered successfully.',
+            'token':    token
+        }), 201
     
     except Exception as e:
         conn.rollback()

@@ -1,17 +1,17 @@
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE users (
-    userID        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    userName          VARCHAR(100)  NOT NULL,
-    email         VARCHAR(150)  UNIQUE NOT NULL,
-    pass          VARCHAR (255)  NOT NULL,
-    phone_number  VARCHAR(20),
-    lastActive    TIMESTAMP     DEFAULT NOW(),
-    created_at    TIMESTAMP     DEFAULT NOW()
+    userID UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    userName VARCHAR(100) NOT NULL,
+    email VARCHAR(150) UNIQUE NOT NULL,
+    pass VARCHAR(255) NOT NULL,
+    phone_number VARCHAR(20),
+    lastActive TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE risk_zones (
-    zoneID        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    zoneID        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     zone_name     VARCHAR(150)  NOT NULL,
     zone_code     VARCHAR(20)   UNIQUE NOT NULL,
     risk_level    VARCHAR(20)   NOT NULL CHECK (risk_level IN ('LOW', 'MODERATE', 'HIGH')),
@@ -26,7 +26,7 @@ CREATE TABLE risk_zones (
 );
 
 CREATE TABLE userLocations (
-    locationID     UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    locationID     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     userID         UUID         NOT NULL REFERENCES users(userID) ON DELETE CASCADE,
     latitude       DECIMAL(9,6) NOT NULL,
     longitude      DECIMAL(9,6) NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE userLocations (
 );
 
 CREATE TABLE emergencyReports (
-    reportID      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    reportID      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     userID        UUID         NOT NULL REFERENCES users(userID) ON DELETE CASCADE,
     report_type   VARCHAR(50)  NOT NULL CHECK (report_type IN (
                       'TRAPPED_PERSON',
@@ -59,14 +59,14 @@ CREATE TABLE emergencyReports (
 );
 
 CREATE TABLE reportPhotos (
-    photoID      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    photoID      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     reportID     UUID         NOT NULL REFERENCES emergencyReports(reportID) ON DELETE CASCADE,
     photo_path   VARCHAR(500) NOT NULL,
     uploaded_at  TIMESTAMP    DEFAULT NOW()
 );
 
 CREATE TABLE alerts (
-    alertID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    alertID UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     message TEXT,
     level VARCHAR(20),
     created_at TIMESTAMP DEFAULT NOW()
