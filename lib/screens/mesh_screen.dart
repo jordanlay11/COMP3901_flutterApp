@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/ble_service.dart';
 import '../services/ble_advertising.dart';
 import '../services/wifi_service.dart';
+import '../services/api_service.dart';
 
 class MeshScreen extends StatefulWidget {
   @override
@@ -102,13 +103,29 @@ class _MeshScreenState extends State<MeshScreen> {
   }
 
   // 📤 Send message
-  void sendMessage() {
+  void sendMessage() async {
     if (messageInput.isEmpty) return;
 
-    wifiService.sendMessage(messageInput, "device");
+    final text = messageInput.trim();
+
+    wifiService.sendMessage(text, "device");
+
+    await ApiService.meshUpload([
+    {
+      "reportID": DateTime.now().millisecondsSinceEpoch.toString(),
+      "report_type": "MESSAGE",
+      "description": text,
+      "latitude": 0,
+      "longitude": 0,
+      "urgency_level": "LOW",
+      "sent_mode": "MESH",
+      "created_at": DateTime.now().toIso8601String(),
+      "ttl": 1
+    }
+  ]);
 
     setState(() {
-      messages.add("📤 $messageInput");
+      messages.add("📤 $text");
       messageInput = "";
     });
   }

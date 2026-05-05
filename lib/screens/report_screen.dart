@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import '../services/wifi_service.dart';
 import 'dart:convert';
+import '../services/api_service.dart';
 
 class ReportScreen extends StatefulWidget {
   @override
@@ -52,7 +53,7 @@ class _ReportScreenState extends State<ReportScreen> {
     }
   }
 
-  void sendReport() {
+  void sendReport() async {
     final report = {
       "id": DateTime.now().millisecondsSinceEpoch.toString(),
       "type": "REPORT",
@@ -66,6 +67,22 @@ class _ReportScreenState extends State<ReportScreen> {
         "image": image?.path // simple reference (can upgrade later)
       }
     };
+
+    final msg = {
+      "report_type": "GENERAL",
+      "description": descController.text,
+      "latitude": position?.latitude,
+      "longitude": position?.longitude,
+      "urgency_level": "MEDIUM",
+      "sent_mode": "INTERNET"
+    };
+
+    try{
+      final response = await ApiService.reportIncident(msg);
+      print("Backend Response: $response");
+    } catch (e) {
+      print("Error sending report: $e");
+    }
 
     wifiService.sendMessage(jsonEncode(report), "device");
 

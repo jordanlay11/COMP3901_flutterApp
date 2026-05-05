@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/api_service.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -14,12 +15,27 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   bool obscurePassword = true;
 
-  void register() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Account Created')),
-    );
+  void register() async {
+    final name = nameController.text.trim();
+    final email = emailController.text.trim();
+    final password = passwordController.text.trim();
 
-    Navigator.pop(context);
+    final result = await ApiService.register(name, email, password);
+
+    if(result["token"] != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Account Created')),
+      );
+
+      Navigator.pop(context);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result["message"] ?? "Registration failed",
+        ),
+        ),
+      );
+    }
+    
   }
 
   @override

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'register_screen.dart';
 import 'admin_dashboard.dart';
 import 'app_container.dart';
+import '../services/api_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -22,16 +23,17 @@ class _LoginScreenState extends State<LoginScreen> {
     isLoading = true;
   });
 
-  await Future.delayed(const Duration(seconds: 1));
-
-  setState(() {
-    isLoading = false;
-  });
-
-  final username = emailController.text.trim().toLowerCase();
+  final username = emailController.text.trim();
+  final password = passwordController.text.trim();
 
   // Admin route
-  if (username == "admin") {
+  if (username.toLowerCase() == "admin") {
+    await Future.delayed(const Duration(seconds: 1));
+
+    setState(() {
+      isLoading = false;
+    });
+
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(builder: (_) => const AdminDashboard()),
@@ -39,13 +41,26 @@ class _LoginScreenState extends State<LoginScreen> {
     return;
   }
 
-  // Normal user route → your tabbed app
-  Navigator.pushReplacement(
-    context,
-    MaterialPageRoute(builder: (_) => const AppContainer()),
-  );
-}
+  final result = await ApiService.login(username, password);
 
+  setState(() {
+      isLoading = false;
+    });
+
+  // Normal user route → your tabbed app
+  if(result["token"] != null){
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const AppContainer()),
+      );
+  } else {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(result["message"] ?? "Login failed"),
+      ),
+    );
+  }
+}
   @override
   Widget build(BuildContext context) {
     return Scaffold(

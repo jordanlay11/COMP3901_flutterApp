@@ -4,6 +4,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import '../services/wifi_service.dart';
 import 'dart:convert';
+import '../services/api_service.dart';
 
 class SosScreen extends StatefulWidget {
   @override
@@ -40,8 +41,8 @@ class _SosScreenState extends State<SosScreen> {
     });
   }
 
-  void sendSOS() {
-    final msg = {
+  void sendSOS() async {
+    final report = {
       "id": DateTime.now().millisecondsSinceEpoch.toString(),
       "type": "SOS",
       "text": "Emergency Alert",
@@ -53,8 +54,21 @@ class _SosScreenState extends State<SosScreen> {
         "location": locationText,
       }
     };
+  
+  final msg = {
+      "report_type": "SOS",
+      "description":"Emergency Alert",
+      "latitude": position?.latitude,
+      "longitude": position?.longitude,
+      "urgency_level": "MEDIUM",
+      "sent_mode": "INTERNET"
+    };
+    // Send direct to Flask backend
+  try {
+    await ApiService.reportIncident(msg);
+  } catch (_) {}
 
-    wifiService.sendMessage(jsonEncode(msg), "device");
+    wifiService.sendMessage(jsonEncode(report), "device");
   }
 
   void startHold() {
