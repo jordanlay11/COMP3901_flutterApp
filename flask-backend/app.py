@@ -198,14 +198,25 @@ def upload_photo(reportID):
     if not allowed_file(file.filename):
         return jsonify({"error": "Invalid file type"}), 400
 
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # 🔐 Ensure report belongs to user
+    cur.execute("""
+        SELECT reportID FROM emergencyReports
+        WHERE reportID=%s AND userID=%s
+    """, (reportID, request.user["user_id"]))
+
+    if not cur.fetchone():
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Unauthorized"}), 403
+
     filename = secure_filename(f"{datetime.datetime.now().timestamp()}_{file.filename}")
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     file.save(filepath)
 
     gps = extract_gps(filepath)
-
-    conn = get_db_connection()
-    cur = conn.cursor()
 
     try:
         cur.execute("""
@@ -327,43 +338,52 @@ def sync():
 
     for r in reports:
         try:
+            # ⛔ Skip invalid TTL
             if r.get("ttl", 1) <= 0:
                 continue
 
-            if r["reportID"] in processed_message:
+            report_id = r.get("reportID")
+            if not report_id:
+                results["errors"] += 1
+                continue
+
+            # ⛔ Prevent duplicates (memory)
+            if report_id in processed_message:
                 results["duplicates"] += 1
                 continue
 
-            cur.execute("SELECT reportID FROM emergencyReports WHERE reportID=%s", (r["reportID"],))
-
+            # ⛔ Prevent duplicates (DB)
+            cur.execute("SELECT reportID FROM emergencyReports WHERE reportID=%s", (report_id,))
             if cur.fetchone():
                 results["duplicates"] += 1
                 continue
 
-            report_type = r["report_type"].upper()
+            # ✅ Validate urgency
+            urgency = (r.get("urgency_level") or "LOW").upper()
+            if urgency not in ["HIGH", "MEDIUM", "LOW"]:
+                urgency = "LOW"
+
+            report_type = (r.get("report_type") or "GENERAL").upper()
 
             cur.execute("""
                 INSERT INTO emergencyReports
                 (reportID, userID, report_type, description, latitude, longitude, urgency_level, status, sent_mode, created_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s)
             """, (
-                r["reportID"],
+                report_id,
                 request.user["user_id"],
                 report_type,
-                r["description"],
-                r["latitude"],
-                r["longitude"],
-                r["urgency_level"],
-                r["sent_mode"],
-                r["created_at"]
-
+                r.get("description"),
+                r.get("latitude"),
+                r.get("longitude"),
+                urgency,
+                r.get("sent_mode"),
+                r.get("created_at")
             ))
-            processed_message.add(r["reportID"])
 
+            processed_message.add(report_id)
             results["saved"] += 1
 
-            
-           
         except Exception as e:
             print("Sync error:", e)
             results["errors"] += 1
@@ -393,14 +413,72 @@ def alerts():
 def protected():
     return jsonify({'message': 'This is a protected route.', 'user': request.user}) 
 
+
+
 @app.route('/mesh/upload', methods=['POST'])
 @token_required
 def upload_mesh():
     data = request.get_json() or {}
     messages = data.get("messages", [])
 
-    request._cached_json = {"reports": messages}
-    return sync()
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    results = {"saved": 0, "duplicates": 0, "errors": 0}
+
+    for r in messages:
+        try:
+            if r.get("ttl", 1) <= 0:
+                continue
+
+            report_id = r.get("reportID")
+            if not report_id:
+                results["errors"] += 1
+                continue
+
+            if report_id in processed_message:
+                results["duplicates"] += 1
+                continue
+
+            cur.execute("SELECT reportID FROM emergencyReports WHERE reportID=%s", (report_id,))
+            if cur.fetchone():
+                results["duplicates"] += 1
+                continue
+
+            urgency = (r.get("urgency_level") or "LOW").upper()
+            if urgency not in ["HIGH", "MEDIUM", "LOW"]:
+                urgency = "LOW"
+
+            report_type = (r.get("report_type") or "GENERAL").upper()
+
+            cur.execute("""
+                INSERT INTO emergencyReports
+                (reportID, userID, report_type, description, latitude, longitude, urgency_level, status, sent_mode, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s)
+            """, (
+                report_id,
+                request.user["user_id"],
+                report_type,
+                r.get("description"),
+                r.get("latitude"),
+                r.get("longitude"),
+                urgency,
+                r.get("sent_mode"),
+                r.get("created_at")
+            ))
+
+            processed_message.add(report_id)
+            results["saved"] += 1
+
+        except Exception as e:
+            print("Mesh upload error:", e)
+            results["errors"] += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify(results)
 
 @app.route("/mesh/download", methods=["GET"])
 @token_required
@@ -426,5 +504,7 @@ def download_mesh():
     conn.close()
 
     return jsonify({"reports": data})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
