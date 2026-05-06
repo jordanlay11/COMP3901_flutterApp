@@ -1,11 +1,14 @@
-import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
-import 'dart:io';
-import 'package:geolocator/geolocator.dart';
-import 'package:geocoding/geocoding.dart';
-import '../services/wifi_service.dart';
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:image_picker/image_picker.dart';
+
 import '../services/api_service.dart';
+import '../services/wifi_service.dart';
 
 class ReportScreen extends StatefulWidget {
   @override
@@ -18,15 +21,71 @@ class _ReportScreenState extends State<ReportScreen> {
   Position? position;
 
   File? image;
+  bool isOnline = false;
+  bool isLocating = false;
+  late StreamSubscription<bool> _connectivitySubscription;
 
   @override
   void initState() {
     super.initState();
-    getLocation();
+    isOnline = wifiService.isOnline;
+    _connectivitySubscription = wifiService.connectivityStream.listen((online) {
+      if (mounted) {
+        setState(() {
+          isOnline = online;
+        });
+      }
+    });
+    refreshLocation();
+  }
+
+  @override
+  void dispose() {
+    _connectivitySubscription.cancel();
+    descController.dispose();
+    super.dispose();
+  }
+
+  Future<void> refreshLocation() async {
+    if (!mounted) return;
+
+    setState(() {
+      isLocating = true;
+      locationText = 'Refreshing location...';
+    });
+
+    try {
+      await getLocation();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          locationText = 'Location unavailable';
+        });
+      }
+      print('Location error: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          isLocating = false;
+        });
+      }
+    }
   }
 
   Future<void> getLocation() async {
-    await Geolocator.requestPermission();
+    LocationPermission permission = await Geolocator.checkPermission();
+
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.deniedForever ||
+        permission == LocationPermission.denied) {
+      setState(() {
+        locationText = 'Location permission denied';
+      });
+      return;
+    }
 
     position = await Geolocator.getCurrentPosition();
 
@@ -35,10 +94,17 @@ class _ReportScreenState extends State<ReportScreen> {
       position!.longitude,
     );
 
+    if (placemarks.isEmpty) {
+      setState(() {
+        locationText = 'Location unavailable';
+      });
+      return;
+    }
+
     final place = placemarks.first;
 
     setState(() {
-      locationText = "${place.street}, ${place.country}";
+      locationText = "${place.street ?? ''}${place.street != null ? ', ' : ''}${place.locality ?? ''}${place.locality != null ? ', ' : ''}${place.country ?? ''}";
     });
   }
 
@@ -64,46 +130,164 @@ class _ReportScreenState extends State<ReportScreen> {
         "location": locationText,
         "lat": position?.latitude,
         "lng": position?.longitude,
-        "image": image?.path // simple reference (can upgrade later)
+        "image": image?.path,
       }
     };
 
     final msg = {
-      "report_type": "GENERAL",
+      "report_type": "OTHER",
       "description": descController.text,
       "latitude": position?.latitude,
       "longitude": position?.longitude,
       "urgency_level": "MEDIUM",
-      "sent_mode": "INTERNET"
+      "sent_mode": isOnline ? "INTERNET" : "MESH"
     };
 
-    try{
-      final response = await ApiService.reportIncident(msg);
-      print("Backend Response: $response");
-    } catch (e) {
-      print("Error sending report: $e");
+    if (descController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please add a description before submitting.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
     }
 
-    wifiService.sendMessage(jsonEncode(report), "device");
+    if (isOnline) {
+      try {
+        final response = await ApiService.reportIncident(msg);
+        print("Backend Response: $response");
 
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text("Report Sent")));
+        final reportData = response is Map ? response['report'] : null;
+        final reportId = reportData is Map
+            ? (reportData['reportid'] ?? reportData['reportID'] ?? reportData['report_id'])?.toString()
+            : null;
+
+        if (image != null && reportId != null) {
+          try {
+            final photoResponse = await ApiService.uploadReportPhoto(reportId, image!);
+            print('Photo upload response: $photoResponse');
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Report and photo uploaded successfully.'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          } catch (e, stackTrace) {
+            wifiService.sendMessage(jsonEncode(report), "device");
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                    'Report created, but photo upload failed. Report saved to mesh.'),
+                backgroundColor: Colors.orange,
+              ),
+            );
+            print("Photo upload error: $e");
+            print(stackTrace);
+          }
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Report submitted to the server.'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } catch (e, stackTrace) {
+        wifiService.sendMessage(jsonEncode(report), "device");
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Unable to send to backend. Report saved to mesh and will retry when online.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        print("Error sending report: $e");
+        print(stackTrace);
+      }
+    } else {
+      wifiService.sendMessage(jsonEncode(report), "device");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'No internet connection. Report queued to mesh for delivery.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text("Submit Report")),
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Submit Report'),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Icon(
+                  isOnline ? Icons.wifi : Icons.wifi_off,
+                  size: 16,
+                  color: isOnline ? Colors.greenAccent : Colors.yellowAccent,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    isOnline ? 'Internet connected' : 'Offline - mesh fallback',
+                    style: const TextStyle(fontSize: 12, color: Colors.white70),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (!isOnline && wifiService.connectedPeers > 0) ...[
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.link,
+                    size: 16,
+                    color: Colors.cyanAccent,
+                  ),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      '${wifiService.connectedPeers} mesh peer${wifiService.connectedPeers == 1 ? '' : 's'}',
+                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ],
+            )
+          ],
+        ),
+      ),
       body: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           children: [
             // 📍 Location
             Row(
-              mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                Icon(Icons.location_on),
-                Text(locationText),
+                const Icon(Icons.location_on),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    locationText,
+                    style: const TextStyle(color: Colors.white70),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  icon: isLocating
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                  onPressed: isLocating ? null : refreshLocation,
+                ),
               ],
             ),
 

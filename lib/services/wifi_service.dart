@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -15,12 +16,20 @@ class WifiService {
 
   bool _serverRunning = false;
   bool _isOnline = false;
+  final StreamController<bool> _connectivityController = StreamController<bool>.broadcast();
 
   bool isHost = false;
   bool meshStarted = false;
+
   bool hasConnections() {
-  return _clients.isNotEmpty;
-}
+    return _clients.isNotEmpty;
+  }
+
+  int get connectedPeers => _clients.length;
+
+  bool get isOnline => _isOnline;
+
+  Stream<bool> get connectivityStream => _connectivityController.stream;
 
   final int MAX_HOPS = 5;
 
@@ -32,16 +41,21 @@ class WifiService {
 
   // 🌐 Monitor internet
   void _monitorInternet() {
-    Connectivity().onConnectivityChanged.listen((result) {
-      final nowOnline = result != ConnectivityResult.none;
+    Connectivity().checkConnectivity().then((results) => _updateOnlineStatus(results));
 
-      if (nowOnline && !_isOnline) {
-        _isOnline = true;
-        _uploadStoredMessages();
-      } else if (!nowOnline) {
-        _isOnline = false;
-      }
-    });
+    Connectivity().onConnectivityChanged.listen(_updateOnlineStatus);
+  }
+
+  void _updateOnlineStatus(List<ConnectivityResult> results) {
+    final nowOnline = results.any((result) => result != ConnectivityResult.none);
+    final wasOnline = _isOnline;
+
+    _isOnline = nowOnline;
+    _connectivityController.add(_isOnline);
+
+    if (nowOnline && !wasOnline) {
+      _uploadStoredMessages();
+    }
   }
 
   // Start mesh

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 
 class ApiService {
@@ -26,15 +27,25 @@ class ApiService {
       );
 
       if (response.body.isEmpty) {
-        throw Exception("Empty response from server");
+        throw Exception("Empty response from server (status: ${response.statusCode})");
       }
 
-      final data = jsonDecode(response.body);
+      dynamic data;
+      try {
+        data = jsonDecode(response.body);
+      } catch (e) {
+        throw Exception("Failed to decode backend response: ${response.body}");
+      }
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         return data;
       } else {
-        throw Exception(data["message"] ?? "Request failed with status ${response.statusCode}");
+        final message = data is Map && data["message"] != null
+            ? data["message"]
+            : data is Map && data["error"] != null
+                ? data["error"]
+                : "Request failed with status ${response.statusCode}";
+        throw Exception("Backend error ($message) [status=${response.statusCode}] response=${response.body}");
       }
     } on TimeoutException catch (e) {
       throw Exception("Timeout: ${e.message}");
@@ -160,5 +171,29 @@ class ApiService {
         headers: headers,
       ),
     );
+  }
+
+  // 📸 Upload report photo
+  static Future uploadReportPhoto(String reportId, File imageFile) async {
+    final uri = Uri.parse("$serverUrl/photo/$reportId");
+    final request = http.MultipartRequest('POST', uri);
+
+    final authHeaders = Map<String, String>.from(headers);
+    authHeaders.remove('Content-Type');
+    request.headers.addAll(authHeaders);
+
+    request.files.add(
+      await http.MultipartFile.fromPath('photo', imageFile.path),
+    );
+
+    final streamedResponse = await request.send().timeout(
+      const Duration(seconds: 20),
+      onTimeout: () {
+        throw TimeoutException('Photo upload timed out.');
+      },
+    );
+
+    final response = await http.Response.fromStream(streamedResponse);
+    return await _handleRequest(Future.value(response));
   }
 }

@@ -6,11 +6,16 @@ import jwt
 import datetime
 from dotenv import load_dotenv
 import os
+import traceback
 from functools import wraps
 from werkzeug.utils import secure_filename
 import exifread
 import bcrypt
 from db import get_db_connection
+
+
+def row_to_dict(cursor, row):
+    return {desc[0]: row[idx] for idx, desc in enumerate(cursor.description)}
 
 
 processed_message= set()
@@ -147,6 +152,9 @@ def register():
 def create_report():
     data = request.json or {}
 
+    print("[Report] request payload:", data)
+    print("[Report] current user:", request.user)
+
     required = ["report_type", "latitude", "longitude", "urgency_level", "sent_mode"]
 
     if not all(field in data for field in required):
@@ -176,10 +184,12 @@ def create_report():
         report = cur.fetchone()
         conn.commit()
         
-        return jsonify({"message": "Report created", "report": report}), 201
+        return jsonify({"message": "Report created", "report": row_to_dict(cur, report)}), 201
 
     except Exception as e:
         conn.rollback()
+        traceback.print_exc()
+        print("[Report] error details:", str(e))
         return jsonify({"error": str(e)}), 500
     
     finally:
@@ -257,12 +267,18 @@ def get_userreports():
             created_at DESC
     """, (request.user["user_id"],))
 
-    data = cur.fetchall()
+    rows = cur.fetchall()
+    reports = []
+    for row in rows:
+        report = row_to_dict(cur, row)
+        if report.get("created_at") is not None:
+            report["created_at"] = report["created_at"].isoformat()
+        reports.append(report)
 
     cur.close()
     conn.close()
 
-    return jsonify({"reports": data})
+    return jsonify({"reports": reports})
     
     
 

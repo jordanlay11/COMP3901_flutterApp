@@ -16,12 +16,32 @@ class _SosScreenState extends State<SosScreen> {
   Position? position;
 
   Timer? holdTimer;
+  Timer? countdownTimer;
   bool holding = false;
+  int countdown = 3;
+  bool isOnline = false;
+  late StreamSubscription<bool> _connectivitySubscription;
 
   @override
   void initState() {
     super.initState();
+    isOnline = wifiService.isOnline;
+    _connectivitySubscription = wifiService.connectivityStream.listen((online) {
+      if (mounted) {
+        setState(() {
+          isOnline = online;
+        });
+      }
+    });
     getLocation();
+  }
+
+  @override
+  void dispose() {
+    _connectivitySubscription.cancel();
+    holdTimer?.cancel();
+    countdownTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> getLocation() async {
@@ -37,7 +57,7 @@ class _SosScreenState extends State<SosScreen> {
     final place = placemarks.first;
 
     setState(() {
-      locationText = "${place.locality}, ${place.country}";
+      locationText = "${place.street}, ${place.subLocality}, ${place.locality}, ${place.subAdministrativeArea}, ${place.administrativeArea}, ${place.postalCode}, ${place.country}";
     });
   }
 
@@ -56,15 +76,15 @@ class _SosScreenState extends State<SosScreen> {
     };
   
   final msg = {
-      "report_type": "SOS",
-      "description":"Emergency Alert",
+      "report_type": "OTHER",
+      "description": "Emergency Alert",
       "latitude": position?.latitude,
       "longitude": position?.longitude,
       "urgency_level": "MEDIUM",
       "sent_mode": "INTERNET"
     };
     // Send direct to Flask backend
-  try {
+    try {
     await ApiService.reportIncident(msg);
   } catch (_) {}
 
@@ -72,26 +92,83 @@ class _SosScreenState extends State<SosScreen> {
   }
 
   void startHold() {
-    holding = true;
+    setState(() {
+      holding = true;
+      countdown = 3;
+    });
 
-    holdTimer = Timer(Duration(seconds: 3), () {
-      if (holding) {
-        sendSOS();
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("SOS Sent")));
+    countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() {
+          countdown--;
+        });
+        if (countdown <= 0) {
+          timer.cancel();
+          sendSOS();
+          setState(() {
+            holding = false;
+          });
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text("SOS Sent")));
+        }
       }
     });
   }
 
   void stopHold() {
-    holding = false;
+    setState(() {
+      holding = false;
+    });
     holdTimer?.cancel();
+    countdownTimer?.cancel();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF10131A),
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('SOS Emergency'),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Icon(
+                  isOnline ? Icons.wifi : Icons.wifi_off,
+                  size: 16,
+                  color: isOnline ? Colors.greenAccent : Colors.yellowAccent,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    isOnline ? 'Internet connected' : 'Offline - mesh fallback',
+                    style: const TextStyle(fontSize: 12, color: Colors.white70),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (!isOnline && wifiService.connectedPeers > 0) ...[
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.link,
+                    size: 16,
+                    color: Colors.cyanAccent,
+                  ),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      '${wifiService.connectedPeers} mesh peer${wifiService.connectedPeers == 1 ? '' : 's'}',
+                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ],
+            )
+          ],
+        ),
+      ),
       body: SafeArea(
         child: Column(
           children: [
@@ -134,11 +211,11 @@ class _SosScreenState extends State<SosScreen> {
                 ),
                 child: Center(
                   child: Text(
-                    "HOLD\nSOS",
+                    holding ? countdown.toString() : "HOLD\nSOS",
                     textAlign: TextAlign.center,
                     style: TextStyle(
                         color: Colors.white,
-                        fontSize: 22,
+                        fontSize: holding ? 48 : 22,
                         fontWeight: FontWeight.bold),
                   ),
                 ),
