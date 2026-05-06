@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class ApiService{
-    static const String serverUrl = "http://192.168.0.9:5000";
+    static const String serverUrl = "http://192.168.100.21:5000";
 
     static String? token;
 
@@ -13,18 +13,22 @@ class ApiService{
 
     //Register user
 
+    
     static Future register(String name, String email, String password) async {
-        final response = await http.post(
-            Uri.parse("$serverUrl/auth/register"),
-            headers: headers,
-            body: jsonEncode({
-                "userName": name,
-                "email": email,
-                "password": password,
-            }),
-        );
-        return jsonDecode(response.body);  
-    }
+  final response = await http.post(
+    Uri.parse("$serverUrl/auth/register"),
+    headers: {
+      "Content-Type": "application/json",   // <-- critical
+    },
+    body: jsonEncode({
+      "userName": name,
+      "email": email,
+      "password": password,
+    }),
+  );
+  return jsonDecode(response.body);
+}
+
 
     //Login user
     static Future login(String email, String password) async {

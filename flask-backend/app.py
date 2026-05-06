@@ -109,25 +109,34 @@ def register():
     cur = conn.cursor()
 
     try:
-        cur.execute("INSERT INTO users (userName, email, pass) VALUES (%s, %s, %s) returning userID", (username, email, hashedPassword))
-
+        cur.execute(
+            "INSERT INTO users (userName, email, pass) VALUES (%s, %s, %s) RETURNING userID, email",
+            (username, email, hashedPassword)
+        )
         user = cur.fetchone()
         conn.commit()
+
         token = jwt.encode({
             "user_id": str(user[0]),
             "email":   user[1],
-            'exp':     datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+            "exp":     datetime.datetime.utcnow() + datetime.timedelta(hours=2)
         }, JWT_SECRET, algorithm="HS256")
 
         return jsonify({
             'message': 'User registered successfully.',
-            'token':    token
+            'token': token
         }), 201
-    
-    except Exception as e:
+
+    except psycopg2.errors.UniqueViolation:
         conn.rollback()
         return jsonify({'message': 'User already exists.'}), 400
-        
+
+    except Exception as e:
+        conn.rollback()
+        # Log the actual error for debugging
+        print("Registration error:", e)
+        return jsonify({'message': 'Registration failed.'}), 500
+
     finally:
         cur.close()
         conn.close()
