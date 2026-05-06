@@ -33,33 +33,22 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      // Admin route
-      if (username.toLowerCase() == "admin") {
-        await Future.delayed(const Duration(seconds: 1));
-
-        if (!mounted) return;
-
-        setState(() {
-          isLoading = false;
-        });
-
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const AdminDashboard()),
-        );
-        return;
-      }
-
-      // API login
       final result = await ApiService.login(username, password);
 
       if (!mounted) return;
 
       if (result != null && result["token"] != null) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const AppContainer()),
-        );
+        if (result["role"] == "admin") {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const AdminDashboard()),
+          );
+        } else {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const AppContainer()),
+          );
+        }
       } else {
         _showError(result?["message"] ?? "Login failed");
       }

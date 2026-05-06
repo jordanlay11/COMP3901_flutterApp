@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import psycopg2
-from auth_middleware import token_required
+from auth_middleware import token_required, admin_required
 from flask_cors import CORS
 import jwt
 import datetime
@@ -26,6 +26,8 @@ CORS(app)
 
 load_dotenv()
 JWT_SECRET = os.getenv('JWT_SECRET')
+ADMIN_EMAIL = os.getenv('ADMIN_EMAIL', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
 
 
 UPLOAD_FOLDER = "uploads"
@@ -65,6 +67,16 @@ def login():
 
     if not email or not password:
         return jsonify({'message': 'Missing credentials.'}), 400
+
+    if email.lower() == ADMIN_EMAIL.lower() and password == ADMIN_PASSWORD:
+        token = jwt.encode({
+            "user_id": "ADMIN",
+            "email": email,
+            "role": "admin",
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+        }, JWT_SECRET, algorithm="HS256")
+
+        return jsonify({'token': token, 'role': 'admin'})
     
     con = get_db_connection()
     cur = con.cursor()
@@ -279,8 +291,44 @@ def get_userreports():
     conn.close()
 
     return jsonify({"reports": reports})
+
+
+@app.route("/admin/reports", methods=["GET"])
+@token_required
+@admin_required
+def admin_get_reports():
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT r.*, u.userName AS reporter_name, u.email AS reporter_email
+        FROM emergencyReports r
+        JOIN users u ON r.userID = u.userID
+        ORDER BY
+            CASE r.urgency_level
+                WHEN 'HIGH' THEN 1
+                WHEN 'MEDIUM' THEN 2
+                ELSE 3
+            END,
+            r.created_at DESC
+    """)
+
+    rows = cur.fetchall()
+    reports = []
+    for row in rows:
+        report = row_to_dict(cur, row)
+        if report.get("created_at") is not None:
+            report["created_at"] = report["created_at"].isoformat()
+        if report.get("resolved_at") is not None:
+            report["resolved_at"] = report["resolved_at"].isoformat()
+        reports.append(report)
+
+    cur.close()
+    conn.close()
+
+    return jsonify({"reports": reports})
     
-    
+
 
 @app.route("/status/<reportID>", methods=["PUT"])
 @token_required
@@ -295,14 +343,32 @@ def update_status(reportID):
     cur = conn.cursor()
 
     try:
-        cur.execute("""
-            UPDATE emergencyReports
-            SET status=%s
-            WHERE reportID=%s AND userID=%s
-            RETURNING *
-    """, (status, reportID, request.user["user_id"]))
+        if request.user.get("role") == "admin":
+            cur.execute("""
+                UPDATE emergencyReports
+                SET status=%s
+                WHERE reportID=%s
+                RETURNING *
+            """, (status, reportID))
+        else:
+            cur.execute("""
+                UPDATE emergencyReports
+                SET status=%s
+                WHERE reportID=%s AND userID=%s
+                RETURNING *
+            """, (status, reportID, request.user["user_id"]))
 
         updated = cur.fetchone()
+        if not updated:
+            conn.rollback()
+            return jsonify({"error": "Report not found or access denied."}), 404
+
+        report = row_to_dict(cur, updated)
+        if report.get("created_at") is not None:
+            report["created_at"] = report["created_at"].isoformat()
+        if report.get("resolved_at") is not None:
+            report["resolved_at"] = report["resolved_at"].isoformat()
+
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -311,7 +377,7 @@ def update_status(reportID):
         cur.close()
         conn.close()
 
-    return jsonify({"report": updated})
+    return jsonify({"report": report})
 
 @app.route("/report/<reportID>", methods=["DELETE"])
 @token_required

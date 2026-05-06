@@ -110,6 +110,16 @@ class ApiService {
     );
   }
 
+  // 📥 Admin: Get all reports
+  static Future getAllReports() async {
+    return await _handleRequest(
+      http.get(
+        Uri.parse("$serverUrl/admin/reports"),
+        headers: headers,
+      ),
+    );
+  }
+
   // ❌ Delete Report
   static Future deleteReport(String reportId) async {
     return await _handleRequest(
