@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -19,16 +20,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<List<UserReport>> _loadReports() async {
-    final response = await ApiService.getReports();
-    final reports = response is Map ? response['reports'] : null;
+    try {
+      final response = await ApiService.getReports();
+      final reports = response is Map ? response['reports'] : null;
 
-    if (reports is List) {
-      return reports
-          .whereType<Map<String, dynamic>>()
-          .map(UserReport.fromJson)
-          .toList();
+      if (reports is List) {
+        return reports
+            .whereType<Map<String, dynamic>>()
+            .map(UserReport.fromJson)
+            .toList();
+      }
+    } catch (e) {
+      // If not logged in or error, return empty list
     }
-
     return [];
   }
 
@@ -36,6 +40,39 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _reportsFuture = _loadReports();
     });
+  }
+
+  Future<bool> _isLoggedIn() async {
+    return await AuthService.isLoggedIn();
+  }
+
+  Future<void> _handleAuth(BuildContext context) async {
+    final isLoggedIn = await _isLoggedIn();
+    if (isLoggedIn) {
+      // Logout
+      await AuthService.clearToken();
+      setState(() {
+        _reportsFuture = _loadReports();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Logged out successfully')),
+      );
+    } else {
+      // Check connectivity before login
+      final connectivityResult = await Connectivity().checkConnectivity();
+      if (connectivityResult == ConnectivityResult.none) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You are offline. Cannot login at this time.')),
+        );
+        return;
+      }
+      // Navigate to login
+      Navigator.pushNamed(context, '/login').then((_) {
+        setState(() {
+          _reportsFuture = _loadReports();
+        });
+      });
+    }
   }
 
   @override
@@ -50,8 +87,8 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: const [
-                  Column(
+                children: [
+                  const Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
@@ -71,10 +108,22 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ],
                   ),
-                  CircleAvatar(
-                    radius: 24,
-                    backgroundColor: Colors.redAccent,
-                    child: Icon(Icons.person, color: Colors.white),
+                  FutureBuilder<bool>(
+                    future: _isLoggedIn(),
+                    builder: (context, snapshot) {
+                      final isLoggedIn = snapshot.data ?? false;
+                      return ElevatedButton(
+                        onPressed: () => _handleAuth(context),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                        ),
+                        child: Text(isLoggedIn ? 'Logout' : 'Login'),
+                      );
+                    },
                   ),
                 ],
               ),
@@ -334,7 +383,7 @@ class UserReport {
 
   String get createdAtLabel {
     if (createdAt != null) {
-      return '${createdAt!.month}/${createdAt!.day}/${createdAt!.year} ${createdAt!.hour.toString().padLeft(2, '0')}:${createdAt!.minute.toString().padLeft(2, '0')}';
+      return '${createdAt!.month}/${createdAt!.day}/${createdAt!.year}';
     }
     return 'Unknown date';
   }

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'register_screen.dart';
 import 'admin_dashboard.dart';
-import 'app_container.dart';
 import '../services/api_service.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -39,14 +38,14 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (result != null && result["token"] != null) {
         if (result["role"] == "admin") {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const AdminDashboard()),
-          );
+          Navigator.pushReplacementNamed(context, '/admin');
         } else {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const AppContainer()),
+          Navigator.pop(context, true);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Logged in successfully.'),
+              backgroundColor: Colors.green,
+            ),
           );
         }
       } else {
@@ -78,6 +77,15 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF10131A),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF10131A),
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: const Text('Login'),
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
           child: Padding(

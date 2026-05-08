@@ -48,3 +48,21 @@ def admin_required(f):
             return jsonify({'message': 'Invalid token.'}), 403
         return f(*args, **kwargs)
     return decorated
+
+def optional_token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        
+        if auth_header:
+            try:
+                token = auth_header.split(" ")[1] 
+                decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+                request.user = decoded
+            except (IndexError, jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+                request.user = None
+        else:
+            request.user = None
+        
+        return f(*args, **kwargs)
+    return decorated

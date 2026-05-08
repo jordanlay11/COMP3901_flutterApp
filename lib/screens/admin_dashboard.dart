@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -75,6 +76,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _refreshReports,
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: () async {
+              await AuthService.clearToken();
+              if (!mounted) return;
+              Navigator.pushNamedAndRemoveUntil(context, '/', (route) => false);
+            },
           ),
         ],
       ),

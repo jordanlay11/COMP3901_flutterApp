@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import psycopg2
-from auth_middleware import token_required, admin_required
+from auth_middleware import token_required, admin_required, optional_token_required
 from flask_cors import CORS
 import jwt
 import datetime
@@ -28,7 +28,9 @@ load_dotenv()
 JWT_SECRET = os.getenv('JWT_SECRET')
 ADMIN_EMAIL = os.getenv('ADMIN_EMAIL', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
-
+OFFLINE_USER_EMAIL_DOMAIN = 'mesh.local'
+OFFLINE_USER_PREFIX = 'offline'
+OFFLINE_USER_PASSWORD = 'offline'
 
 UPLOAD_FOLDER = "uploads"
 if not os.path.exists(UPLOAD_FOLDER):
@@ -57,6 +59,40 @@ def extract_gps(file_path):
     except Exception as e:
         print("EXIF error:", e)
         return None
+
+
+def get_or_create_offline_user(device_id=None):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        if device_id:
+            offline_email = f"{device_id}@{OFFLINE_USER_EMAIL_DOMAIN}"
+            username = f"Offline device {device_id[:8]}"
+        else:
+            offline_email = f"{OFFLINE_USER_PREFIX}@{OFFLINE_USER_EMAIL_DOMAIN}"
+            username = "Offline User"
+
+        cur.execute("SELECT userID FROM users WHERE email=%s", (offline_email,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+        password_hash = bcrypt.hashpw(OFFLINE_USER_PASSWORD.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        cur.execute(
+            "INSERT INTO users (userName, email, pass) VALUES (%s, %s, %s) RETURNING userID",
+            (username, offline_email, password_hash)
+        )
+        user_id = cur.fetchone()[0]
+        conn.commit()
+        return user_id
+    except Exception as e:
+        conn.rollback()
+        print("Offline user creation error:", e)
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
 
 @app.route('/auth/login', methods=['POST'])
 def login():
@@ -160,7 +196,7 @@ def register():
 
         
 @app.route("/report", methods=["POST"])
-@token_required
+@optional_token_required
 def create_report():
     data = request.json or {}
 
@@ -178,13 +214,22 @@ def create_report():
     cur = conn.cursor()
 
     try:
+        user_id = None
+        if request.user and request.user.get("user_id") and request.user.get("user_id") != "ADMIN":
+            user_id = request.user["user_id"]
+        else:
+            user_id = get_or_create_offline_user(data.get("device_id"))
+
+        if not user_id:
+            return jsonify({"error": "Unable to determine user owner for report."}), 500
+
         cur.execute("""
             INSERT INTO emergencyReports 
             (reportID, userID, report_type, description, latitude, longitude, urgency_level, status, sent_mode, created_at)
             VALUES (gen_random_uuid(), %s,%s,%s,%s,%s,%s,'PENDING',%s,NOW())
             RETURNING *
         """, (
-            request.user["user_id"],
+            user_id,
             report_type,
             data.get("description"),
             data["latitude"],
@@ -408,7 +453,7 @@ def delete_report(reportID):
     return jsonify({"message": "Deleted"})
 
 @app.route("/sync", methods=["POST"])
-@token_required
+@optional_token_required
 def sync():
     data = request.json or {}
     reports = data.get("reports", [])
@@ -446,6 +491,15 @@ def sync():
                 urgency = "LOW"
 
             report_type = (r.get("report_type") or "GENERAL").upper()
+            user_id = None
+            if request.user and request.user.get("user_id") and request.user.get("user_id") != "ADMIN":
+                user_id = request.user["user_id"]
+            else:
+                user_id = get_or_create_offline_user(r.get("device_id"))
+
+            if not user_id:
+                results["errors"] += 1
+                continue
 
             cur.execute("""
                 INSERT INTO emergencyReports
@@ -453,7 +507,7 @@ def sync():
                 VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s)
             """, (
                 report_id,
-                request.user["user_id"],
+                user_id,
                 report_type,
                 r.get("description"),
                 r.get("latitude"),
@@ -498,7 +552,7 @@ def protected():
 
 
 @app.route('/mesh/upload', methods=['POST'])
-@token_required
+@optional_token_required
 def upload_mesh():
     data = request.get_json() or {}
     messages = data.get("messages", [])
@@ -532,6 +586,15 @@ def upload_mesh():
                 urgency = "LOW"
 
             report_type = (r.get("report_type") or "GENERAL").upper()
+            user_id = None
+            if request.user and request.user.get("user_id") and request.user.get("user_id") != "ADMIN":
+                user_id = request.user["user_id"]
+            else:
+                user_id = get_or_create_offline_user(r.get("device_id"))
+
+            if not user_id:
+                results["errors"] += 1
+                continue
 
             cur.execute("""
                 INSERT INTO emergencyReports
@@ -539,7 +602,7 @@ def upload_mesh():
                 VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s)
             """, (
                 report_id,
-                request.user["user_id"],
+                user_id,
                 report_type,
                 r.get("description"),
                 r.get("latitude"),

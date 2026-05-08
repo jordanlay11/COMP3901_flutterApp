@@ -8,6 +8,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import '../services/wifi_service.dart';
 
 class ReportScreen extends StatefulWidget {
@@ -120,11 +121,14 @@ class _ReportScreenState extends State<ReportScreen> {
   }
 
   void sendReport() async {
+    final deviceId = await AuthService.getDeviceId();
+
     final report = {
       "id": DateTime.now().millisecondsSinceEpoch.toString(),
       "type": "REPORT",
       "origin": "device",
       "hopCount": 0,
+      "device_id": deviceId,
       "data": {
         "description": descController.text,
         "location": locationText,
@@ -140,7 +144,8 @@ class _ReportScreenState extends State<ReportScreen> {
       "latitude": position?.latitude,
       "longitude": position?.longitude,
       "urgency_level": "MEDIUM",
-      "sent_mode": isOnline ? "INTERNET" : "MESH"
+      "sent_mode": isOnline ? "INTERNET" : "MESH",
+      "device_id": deviceId,
     };
 
     if (descController.text.trim().isEmpty) {

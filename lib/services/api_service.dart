@@ -2,16 +2,25 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'auth_service.dart';
 
 class ApiService {
   static const String serverUrl = "http://192.168.100.21:5000";
 
-  static String? token;
+  static Future<String?> getToken() async {
+    return await AuthService.getToken();
+  }
 
-  static Map<String, String> get headers => {
-        "Content-Type": "application/json",
-        if (token != null) "Authorization": "Bearer $token",
-      };
+  static Future<Map<String, String>> get headers async {
+    final token = await getToken();
+    final headers = <String, String>{
+      "Content-Type": "application/json",
+    };
+    if (token != null) {
+      headers["Authorization"] = "Bearer $token";
+    }
+    return headers;
+  }
 
   // 🔧 Generic request handler (prevents duplication)
   static Future<dynamic> _handleRequest(Future<http.Response> request) async {
@@ -59,7 +68,7 @@ class ApiService {
     return await _handleRequest(
       http.post(
         Uri.parse("$serverUrl/auth/register"),
-        headers: headers,
+        headers: await headers,
         body: jsonEncode({
           "userName": name,
           "email": email,
@@ -74,7 +83,7 @@ class ApiService {
     final data = await _handleRequest(
       http.post(
         Uri.parse("$serverUrl/auth/login"),
-        headers: headers,
+        headers: await headers,
         body: jsonEncode({
           "email": email,
           "password": password,
@@ -83,7 +92,8 @@ class ApiService {
     );
 
     if (data["token"] != null) {
-      token = data["token"];
+      final role = data["role"] ?? "user";
+      await AuthService.setToken(data["token"], role);
     }
 
     return data;
@@ -94,7 +104,7 @@ class ApiService {
     return await _handleRequest(
       http.post(
         Uri.parse("$serverUrl/report"),
-        headers: headers,
+        headers: await headers,
         body: jsonEncode(report),
       ),
     );
@@ -105,7 +115,7 @@ class ApiService {
     return await _handleRequest(
       http.get(
         Uri.parse("$serverUrl/userreport"),
-        headers: headers,
+        headers: await headers,
       ),
     );
   }
@@ -115,7 +125,7 @@ class ApiService {
     return await _handleRequest(
       http.get(
         Uri.parse("$serverUrl/admin/reports"),
-        headers: headers,
+        headers: await headers,
       ),
     );
   }
@@ -125,7 +135,7 @@ class ApiService {
     return await _handleRequest(
       http.delete(
         Uri.parse("$serverUrl/report/$reportId"),
-        headers: headers,
+        headers: await headers,
       ),
     );
   }
@@ -135,7 +145,7 @@ class ApiService {
     return await _handleRequest(
       http.put(
         Uri.parse("$serverUrl/status/$reportId"),
-        headers: headers,
+        headers: await headers,
         body: jsonEncode({"status": status}),
       ),
     );
@@ -146,7 +156,7 @@ class ApiService {
     return await _handleRequest(
       http.get(
         Uri.parse("$serverUrl/alerts"),
-        headers: headers,
+        headers: await headers,
       ),
     );
   }
@@ -156,7 +166,7 @@ class ApiService {
     return await _handleRequest(
       http.post(
         Uri.parse("$serverUrl/sync"),
-        headers: headers,
+        headers: await headers,
         body: jsonEncode({"reports": reports}),
       ),
     );
@@ -167,7 +177,7 @@ class ApiService {
     return await _handleRequest(
       http.post(
         Uri.parse("$serverUrl/mesh/upload"),
-        headers: headers,
+        headers: await headers,
         body: jsonEncode({"messages": messages}),
       ),
     );
@@ -178,7 +188,7 @@ class ApiService {
     return await _handleRequest(
       http.get(
         Uri.parse("$serverUrl/mesh/download"),
-        headers: headers,
+        headers: await headers,
       ),
     );
   }
@@ -188,7 +198,7 @@ class ApiService {
     final uri = Uri.parse("$serverUrl/photo/$reportId");
     final request = http.MultipartRequest('POST', uri);
 
-    final authHeaders = Map<String, String>.from(headers);
+    final authHeaders = Map<String, String>.from(await headers);
     authHeaders.remove('Content-Type');
     request.headers.addAll(authHeaders);
 
