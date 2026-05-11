@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 class BleService {
   final Set<String> _seenDevices = {};
   bool _isScanning = false;
+  bool _keepScanning = false;
 
   bool get isScanning => _isScanning;
 
@@ -25,22 +26,16 @@ class BleService {
 
     _seenDevices.clear();
     _isScanning = true;
-
-    await FlutterBluePlus.startScan(
-      timeout: const Duration(seconds: 10),
-    );
+    _keepScanning = true;
 
     FlutterBluePlus.scanResults.listen((results) {
       for (ScanResult r in results) {
         final deviceId = r.device.remoteId.str;
 
-        // 🚫 Skip duplicates
         if (_seenDevices.contains(deviceId)) continue;
         _seenDevices.add(deviceId);
 
         final adv = r.advertisementData;
-
-        // 🔍 Only process devices with manufacturer data
         if (adv.manufacturerData.isEmpty) continue;
 
         try {
@@ -48,7 +43,6 @@ class BleService {
           final decoded = utf8.decode(bytes);
           final data = jsonDecode(decoded);
 
-          // ✅ Validate mesh payload
           if (data is Map<String, dynamic> &&
               data.containsKey("ip") &&
               data.containsKey("p")) {
@@ -59,12 +53,19 @@ class BleService {
         }
       }
     });
+
+    while (_keepScanning) {
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
+      if (!_keepScanning) break;
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
   }
 
   // 🛑 Stop scanning
   Future<void> stopScan() async {
     if (!_isScanning) return;
 
+    _keepScanning = false;
     await FlutterBluePlus.stopScan();
     _isScanning = false;
   }

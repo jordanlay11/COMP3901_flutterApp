@@ -1,67 +1,84 @@
 import 'dart:convert';
+
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
-import 'package:network_info_plus/network_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'wifi_service.dart';
+
 class BleAdvertising {
-  final FlutterBlePeripheral _blePeripheral = FlutterBlePeripheral();
+  final FlutterBlePeripheral _peripheral =
+      FlutterBlePeripheral();
+
   bool _isAdvertising = false;
 
   bool get isAdvertising => _isAdvertising;
 
-  // 🔐 Permissions
+  // =========================
+  // 🔐 REQUEST PERMISSIONS
+  // =========================
   Future<void> _requestPermissions() async {
     await [
       Permission.location,
+      Permission.bluetooth,
       Permission.bluetoothAdvertise,
       Permission.bluetoothConnect,
     ].request();
   }
 
-  // 📢 Start advertising
-  Future<void> startAdvertising(Function(String) onStatus) async {
+  // =========================
+  // 📢 START ADVERTISING
+  // =========================
+  Future<void> startAdvertising(
+    Function(String)? onStatus,
+  ) async {
     if (_isAdvertising) return;
 
     await _requestPermissions();
 
     try {
-      final info = NetworkInfo();
-      final ip = await info.getWifiIP();
+      // 🌐 Get local IP
+      final ip = await wifiService.getLocalIP();
 
       if (ip == null) {
-        onStatus("No IP found");
+        onStatus?.call("No network IP found");
         return;
       }
 
+      // 📦 Mesh payload
       final payload = jsonEncode({
         "ip": ip,
         "p": 8080,
       });
 
       final advertiseData = AdvertiseData(
-        serviceUuid: "12345678-1234-1234-1234-123456789abc",
+        includeDeviceName: true,
         manufacturerId: 1234,
         manufacturerData: utf8.encode(payload),
-        includeDeviceName: true,
       );
 
-      await _blePeripheral.start(advertiseData: advertiseData);
+      await _peripheral.start(
+        advertiseData: advertiseData,
+      );
 
       _isAdvertising = true;
-      onStatus("Advertising");
-    } catch (_) {
-      onStatus("Advertising failed");
+
+      onStatus?.call("Advertising started");
+    } catch (e) {
+      onStatus?.call("Advertising failed");
     }
   }
 
-  // 🛑 Stop advertising
-  Future<void> stopAdvertising(Function(String) onStatus) async {
+  // =========================
+  // 🛑 STOP ADVERTISING
+  // =========================
+  Future<void> stopAdvertising() async {
     if (!_isAdvertising) return;
 
-    await _blePeripheral.stop();
-    _isAdvertising = false;
+    try {
+      await _peripheral.stop();
 
-    onStatus("Advertising stopped");
+      _isAdvertising = false;
+    } catch (_) {}
   }
 }
 

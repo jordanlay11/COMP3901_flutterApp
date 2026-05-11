@@ -312,6 +312,11 @@ def get_userreports():
     conn = get_db_connection()
     cur = conn.cursor()
 
+    if request.user.get("user_id") == "ADMIN":
+        cur.close()
+        conn.close()
+        return jsonify({"reports": []})
+
     cur.execute("""
         SELECT * FROM emergencyReports
         WHERE userID = %s

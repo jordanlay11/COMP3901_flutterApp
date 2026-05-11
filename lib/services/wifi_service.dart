@@ -2,301 +2,329 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:http/http.dart' as http;
+import 'package:network_info_plus/network_info_plus.dart';
+
 
 class WifiService {
   ServerSocket? _server;
+
   final List<Socket> _clients = [];
-
-  final Set<String> _seenMessages = {};
   final Set<String> _connectedIPs = {};
-
+  final Set<String> _seenMessages = {};
   final List<Map<String, dynamic>> _messageQueue = [];
-  final List<Map<String, dynamic>> _localStorage = [];
 
   bool _serverRunning = false;
-  bool _isOnline = false;
-  final StreamController<bool> _connectivityController = StreamController<bool>.broadcast();
 
-  bool isHost = false;
-  bool meshStarted = false;
-
-  bool hasConnections() {
-    return _clients.isNotEmpty;
-  }
-
-  int get connectedPeers => _clients.length;
-
-  bool get isOnline => _isOnline;
-
-  Stream<bool> get connectivityStream => _connectivityController.stream;
-
-  final int MAX_HOPS = 5;
+  static const int PORT = 8080;
+  static const int MAX_HOPS = 5;
 
   bool get isServerRunning => _serverRunning;
 
-  WifiService() {
-    _monitorInternet();
-  }
+  List<String> get connectedDevices => _connectedIPs.toList();
 
-  // 🌐 Monitor internet
-  void _monitorInternet() {
-    Connectivity().checkConnectivity().then((results) => _updateOnlineStatus(results));
+  // ── Mesh state ─────────────────────────────────────────────
+  bool meshStarted = false;
+  bool isHost = false;
+  bool isOnline = false;
 
-    Connectivity().onConnectivityChanged.listen(_updateOnlineStatus);
-  }
+  // ── Peer count (used by report/SOS screens) ────────────────
+  int _connectedPeers = 0;
+  int get connectedPeers => _connectedPeers;
 
-  void _updateOnlineStatus(List<ConnectivityResult> results) {
-    final nowOnline = results.any((result) => result != ConnectivityResult.none);
-    final wasOnline = _isOnline;
+  // ── Logs ───────────────────────────────────────────────────
+  List<String> logs = [];
 
-    _isOnline = nowOnline;
-    _connectivityController.add(_isOnline);
+  // ── Queues ─────────────────────────────────────────────────
+  List<Map<String, dynamic>> queuedMessages = [];
+  List<Map<String, dynamic>> localStoredMessages = [];
 
-    if (nowOnline && !wasOnline) {
-      _uploadStoredMessages();
-    }
-  }
+  int get meshQueueLength => queuedMessages.length;
+  int get queuedLocalMessages => localStoredMessages.length;
 
-  // Start mesh
+  // ── Connectivity stream ────────────────────────────────────
+  final StreamController<bool> _connectivityController =
+      StreamController<bool>.broadcast();
+
+  Stream<bool> get connectivityStream => _connectivityController.stream;
+
+  // =========================
+  // 🚀 START MESH
+  // Orchestrates BLE peripheral + central + TCP server.
+  // Called from app_container or MeshScreen.
+  // =========================
   Future<void> startMesh({
-  required Function(String) onMessage,
-  required Function(String) onStatus,
-  required Function(Map<String, dynamic>) onDeviceFound,
-  required Function startAdvertising,
-  required Function startScan,
-}) async {
-  if (meshStarted) return;
-  meshStarted = true;
+    required Function(String) onMessage,
+    required Function(String) onStatus,
+    required Function(Map<String, dynamic>) onDeviceFound,
+    required Function() startAdvertising,
+    required Function(Function(Map<String, dynamic>)) startScan,
+  }) async {
+    if (meshStarted) return;
+    meshStarted = true;
 
-  onStatus("🚀 Starting mesh...");
+    onStatus('Starting mesh...');
 
-  // 1️⃣ Start server (your existing logic)
-  await startServer(onMessage);
+    // Monitor internet connectivity
+    Connectivity().onConnectivityChanged.listen((result) {
+      final online = result != ConnectivityResult.none;
+      isOnline = online;
+      _connectivityController.add(online);
+      onStatus(online ? '🌐 Internet connected' : '📡 Offline — mesh mode');
+    });
 
-  // 2️⃣ Start BLE advertising
-  startAdvertising();
-  onStatus("📡 Advertising started");
+    final current = await Connectivity().checkConnectivity();
+    isOnline = current != ConnectivityResult.none;
+    _connectivityController.add(isOnline);
 
-  // 3️⃣ Start scanning → AUTO CONNECT 
-  startScan((data) {
-    final ip = data["ip"];
-    final port = data["p"];
-
-    onStatus("🔍 Found device: $ip");
-
-    if (ip != null) {
-    connect(
-      ip,
-      (connectedIp) {
-        onStatus("✅ Connected to $connectedIp");
+    // Start TCP server (host role)
+    await startServer(
+      onMessage,
+      (ip) {
+        _connectedPeers++;
+        onStatus('Client connected: $ip');
       },
-      (msg) {
-        onStatus("📥 $msg");
+      (ip) {
+        if (_connectedPeers > 0) _connectedPeers--;
+        onStatus('Client disconnected: $ip');
       },
     );
-  }
-  });
-
-  // 4️⃣ Wait to discover peers
-  await Future.delayed(const Duration(seconds: 6));
-
-  // 5️⃣ Decide role
-  if (!hasConnections()) {
     isHost = true;
+    onStatus('TCP server started on port $PORT');
 
-    onStatus("⚠️ No peers found");
-    onStatus("📶 Enable hotspot to become mesh host");
-  } else {
-    isHost = false;
-    onStatus("🟢 Connected to mesh (client mode)");
+    // Start BLE advertising so others can find us
+    startAdvertising();
+
+    // Start BLE scanning so we can find others
+    startScan((data) {
+      onDeviceFound(data);
+      final ip = data['ip'] as String?;
+      if (ip != null) {
+        connect(
+          ip,
+          (connectedIp) {
+            _connectedPeers++;
+            onStatus('Connected to peer: $connectedIp');
+          },
+          (disconnectedIp) {
+            if (_connectedPeers > 0) _connectedPeers--;
+            onStatus('Peer disconnected: $disconnectedIp');
+          },
+          onMessage,
+        );
+      }
+    });
+
+    onStatus('Mesh started');
   }
-}
 
-  // 🚀 Start server
-  Future<void> startServer(Function(String) onMessage) async {
+  // =========================
+  // 🚀 START SERVER
+  // =========================
+  Future<void> startServer(
+    Function(String) onMessage,
+    Function(String)? onClientConnected,
+    Function(String)? onClientDisconnected,
+  ) async {
     if (_serverRunning) return;
 
     try {
-      _server = await ServerSocket.bind(InternetAddress.anyIPv4, 8080);
+      _server = await ServerSocket.bind(InternetAddress.anyIPv4, PORT);
       _serverRunning = true;
 
       _server!.listen((socket) {
         final ip = socket.remoteAddress.address;
 
+        if (_connectedIPs.contains(ip)) {
+          socket.destroy();
+          return;
+        }
+
         _clients.add(socket);
         _connectedIPs.add(ip);
-
+        onClientConnected?.call(ip);
         _flushQueue();
 
-        socket.listen((data) {
-          final msgStr = utf8.decode(data);
-
-          try {
-            final msg = jsonDecode(msgStr);
-            final id = msg["id"];
-
-            if (_seenMessages.contains(id)) return;
-            _seenMessages.add(id);
-
-            int hop = msg["hopCount"] ?? 0;
-            if (hop >= MAX_HOPS) return;
-
-            // 💾 Store locally
-            _storeMessage(msg);
-
-            final text = msg["text"];
-            onMessage("$text (hop: $hop)");
-
-            msg["hopCount"] = hop + 1;
-            final updated = jsonEncode(msg);
-
-            for (var c in _clients) {
-              if (c != socket) {
-                c.write(updated);
-              }
-            }
-          } catch (_) {}
-        });
-
-        socket.done.then((_) {
-          _clients.remove(socket);
-          _connectedIPs.remove(ip);
-        });
+        socket.listen(
+          (data) => _handleIncomingMessage(data, socket, onMessage),
+          onDone: () {
+            _clients.remove(socket);
+            _connectedIPs.remove(ip);
+            onClientDisconnected?.call(ip);
+          },
+          onError: (_) {
+            _clients.remove(socket);
+            _connectedIPs.remove(ip);
+            onClientDisconnected?.call(ip);
+          },
+        );
       });
     } catch (_) {}
   }
 
-  // 🔗 Connect
-  Future<void> connect(String ip, Function(String)? onConnected, Function(String)? onMessage) async {
-  if (_connectedIPs.contains(ip)) return;
+  // =========================
+  // 🔗 CONNECT TO HOST
+  // =========================
+  Future<bool> connect(
+    String ip,
+    Function(String)? onConnected,
+    Function(String)? onDisconnected,
+    Function(String)? onMessage,
+  ) async {
+    if (_connectedIPs.contains(ip)) return true;
 
-  try {
-    final socket = await Socket.connect(ip, 8080);
+    try {
+      final socket = await Socket.connect(ip, PORT,
+          timeout: const Duration(seconds: 5));
 
-    _clients.add(socket);
-    _connectedIPs.add(ip);
+      _clients.add(socket);
+      _connectedIPs.add(ip);
+      onConnected?.call(ip);
+      _flushQueue();
 
-    if (onConnected != null) {
-      onConnected(ip);
+      socket.listen(
+        (data) => _handleIncomingMessage(data, socket, onMessage),
+        onDone: () {
+          _clients.remove(socket);
+          _connectedIPs.remove(ip);
+          onDisconnected?.call(ip);
+        },
+        onError: (_) {
+          _clients.remove(socket);
+          _connectedIPs.remove(ip);
+          onDisconnected?.call(ip);
+        },
+      );
+
+      return true;
+    } catch (_) {
+      return false;
     }
+  }
 
-    _flushQueue();
+  // =========================
+  // 📩 HANDLE INCOMING MESSAGE
+  // =========================
+  void _handleIncomingMessage(
+    List<int> data,
+    Socket sender,
+    Function(String)? onMessage,
+  ) {
+    try {
+      final decoded = utf8.decode(data);
+      final msg = jsonDecode(decoded);
+      final id = msg['id'];
 
-    socket.listen((data) {
-      final msgStr = utf8.decode(data);
+      if (_seenMessages.contains(id)) return;
+      _seenMessages.add(id);
 
-      try {
-        final msg = jsonDecode(msgStr);
-        final id = msg["id"];
+      int hop = msg['hopCount'] ?? 0;
+      if (hop >= MAX_HOPS) return;
 
-        if (_seenMessages.contains(id)) return;
-        _seenMessages.add(id);
+      final text = msg['text'] ?? '';
+      onMessage?.call('$text (hop: $hop)');
 
-        int hop = msg["hopCount"] ?? 0;
-        if (hop >= MAX_HOPS) return;
+      msg['hopCount'] = hop + 1;
+      final updated = jsonEncode(msg);
 
-        // 💾 Store locally
-        _storeMessage(msg);
+      for (final client in _clients) {
+        if (client == sender) continue;
+        client.write(updated);
+      }
+    } catch (_) {}
+  }
 
-        // ✅ 🔥 ADD THIS LINE
-        if (onMessage != null) {
-          final text = msg["text"];
-          onMessage("$text (hop: $hop)");
-        }
-
-        msg["hopCount"] = hop + 1;
-        final updated = jsonEncode(msg);
-
-        for (var c in _clients) {
-          if (c != socket) {
-            c.write(updated);
-          }
-        }
-      } catch (_) {}
-    });
-  } catch (_) {}
-}
-
-
-  // 📤 Send message
-  void sendMessage(String text, String origin) {
+  // =========================
+  // 📤 SEND MESSAGE
+  // [payload] is the API-formatted object stored for upload.
+  // =========================
+  Future<void> sendMessage(
+    String text,
+    String senderId, {
+    Map<String, dynamic>? payload,
+  }) async {
     final msg = {
-      "id": DateTime.now().millisecondsSinceEpoch.toString(),
-      "text": text,
-      "origin": origin,
-      "hopCount": 0,
-      "uploaded": false,
+      'id': DateTime.now().millisecondsSinceEpoch.toString(),
+      'sender': senderId,
+      'text': text,
+      'hopCount': 0,
+      'timestamp': DateTime.now().toIso8601String(),
     };
 
-    _storeMessage(msg);
-
-    if (_clients.isEmpty) {
-      _messageQueue.add(msg);
-      return;
+    // Store API payload for later upload if provided
+    if (payload != null) {
+      localStoredMessages.add(payload);
     }
 
     final encoded = jsonEncode(msg);
 
-    for (var c in _clients) {
-      c.write(encoded);
-    }
-  }
-
-  // 💾 Store message locally
-  void _storeMessage(Map<String, dynamic> msg) {
-    final exists =
-        _localStorage.any((m) => m["id"] == msg["id"]);
-
-    if (!exists) {
-      _localStorage.add(msg);
-    }
-  }
-
-  // 🔁 Flush queued messages
-  void _flushQueue() {
-    if (_clients.isEmpty || _messageQueue.isEmpty) return;
-
-    for (var msg in _messageQueue) {
-      final encoded = jsonEncode(msg);
-
-      for (var c in _clients) {
-        c.write(encoded);
-      }
+    if (_clients.isEmpty) {
+      _messageQueue.add(msg);
+      queuedMessages.add(msg);
+      return;
     }
 
-    _messageQueue.clear();
-  }
-
-  // 🌐 Upload messages
-  Future<void> _uploadStoredMessages() async {
-    for (var msg in _localStorage) {
-      if (msg["uploaded"] == true) continue;
-
+    for (final client in _clients) {
       try {
-        // 🔥 Replace with YOUR backend URL
-        final response = await http.post(
-          Uri.parse("https://your-server.com/api/report"),
-          headers: {"Content-Type": "application/json"},
-          body: jsonEncode(msg),
-        );
-
-        if (response.statusCode == 200) {
-          msg["uploaded"] = true;
-        }
+        client.write(encoded);
       } catch (_) {}
     }
   }
 
-  // 🛑 Stop server
-  Future<void> stopServer() async {
-    await _server?.close();
-    _serverRunning = false;
-    _clients.clear();
-    _connectedIPs.clear();
-    _seenMessages.clear();
+  // =========================
+  // 📤 FLUSH QUEUE
+  // =========================
+  void _flushQueue() {
+    if (_clients.isEmpty) return;
+
+    for (final msg in _messageQueue) {
+      final encoded = jsonEncode(msg);
+      for (final client in _clients) {
+        try {
+          client.write(encoded);
+        } catch (_) {}
+      }
+    }
+
     _messageQueue.clear();
-    _localStorage.clear();
+    queuedMessages.clear();
+  }
+
+  // =========================
+  // 🌐 GET LOCAL IP
+  // =========================
+  Future<String?> getLocalIP() async {
+    try {
+      final info = NetworkInfo();
+      final wifiIP = await info.getWifiIP();
+      if (wifiIP != null) return wifiIP;
+
+      final interfaces = await NetworkInterface.list();
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
+            return addr.address;
+          }
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // =========================
+  // 🛑 STOP SERVER
+  // =========================
+  Future<void> stopServer() async {
+    try {
+      for (final client in _clients) {
+        await client.close();
+      }
+      _clients.clear();
+      _connectedIPs.clear();
+      await _server?.close();
+      _serverRunning = false;
+    } catch (_) {}
   }
 }
 

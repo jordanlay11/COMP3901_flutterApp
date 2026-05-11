@@ -7,9 +7,10 @@ import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../services/mesh_service.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
-import '../services/wifi_service.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class ReportScreen extends StatefulWidget {
   @override
@@ -18,7 +19,7 @@ class ReportScreen extends StatefulWidget {
 
 class _ReportScreenState extends State<ReportScreen> {
   final TextEditingController descController = TextEditingController();
-  String locationText = "Getting location...";
+  String locationText = 'Getting location...';
   Position? position;
 
   File? image;
@@ -29,13 +30,10 @@ class _ReportScreenState extends State<ReportScreen> {
   @override
   void initState() {
     super.initState();
-    isOnline = wifiService.isOnline;
-    _connectivitySubscription = wifiService.connectivityStream.listen((online) {
-      if (mounted) {
-        setState(() {
-          isOnline = online;
-        });
-      }
+    isOnline = meshService.isOnline;
+    _connectivitySubscription =
+        meshService.connectivityStream.listen((online) {
+      if (mounted) setState(() => isOnline = online);
     });
     refreshLocation();
   }
@@ -47,9 +45,11 @@ class _ReportScreenState extends State<ReportScreen> {
     super.dispose();
   }
 
+  // =========================
+  // 📍 LOCATION
+  // =========================
   Future<void> refreshLocation() async {
     if (!mounted) return;
-
     setState(() {
       isLocating = true;
       locationText = 'Refreshing location...';
@@ -58,96 +58,83 @@ class _ReportScreenState extends State<ReportScreen> {
     try {
       await getLocation();
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          locationText = 'Location unavailable';
-        });
-      }
-      print('Location error: $e');
+      if (mounted) setState(() => locationText = 'Location unavailable');
     } finally {
-      if (mounted) {
-        setState(() {
-          isLocating = false;
-        });
-      }
+      if (mounted) setState(() => isLocating = false);
     }
   }
 
   Future<void> getLocation() async {
     LocationPermission permission = await Geolocator.checkPermission();
-
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
     }
-
     if (permission == LocationPermission.deniedForever ||
         permission == LocationPermission.denied) {
-      setState(() {
-        locationText = 'Location permission denied';
-      });
+      setState(() => locationText = 'Location permission denied');
       return;
     }
 
-    position = await Geolocator.getCurrentPosition();
-
-    final placemarks = await placemarkFromCoordinates(
-      position!.latitude,
-      position!.longitude,
+    // Best accuracy for geocoding
+    position = await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.best,
     );
 
-    if (placemarks.isEmpty) {
-      setState(() {
-        locationText = 'Location unavailable';
-      });
-      return;
-    }
+    try {
+      final placemarks = await placemarkFromCoordinates(
+        position!.latitude,
+        position!.longitude,
+      );
 
-    final place = placemarks.first;
+      if (placemarks.isNotEmpty) {
+        final place = placemarks.first;
 
+        // Filter out null, empty, and generic "Unnamed Road" values
+        bool isUseful(String? s) =>
+            s != null &&
+            s.isNotEmpty &&
+            !s.toLowerCase().contains('unnamed');
+
+        final parts = [
+          if (isUseful(place.street)) place.street,
+          if (isUseful(place.subLocality)) place.subLocality,
+          if (isUseful(place.locality)) place.locality,
+          if (isUseful(place.subAdministrativeArea)) place.subAdministrativeArea,
+          if (isUseful(place.administrativeArea)) place.administrativeArea,
+          if (isUseful(place.country)) place.country,
+        ];
+
+        if (parts.isNotEmpty) {
+          setState(() => locationText = parts.join(', '));
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // Fallback: raw coordinates if geocoding fails or returns nothing useful
     setState(() {
-      locationText = "${place.street ?? ''}${place.street != null ? ', ' : ''}${place.locality ?? ''}${place.locality != null ? ', ' : ''}${place.country ?? ''}";
+      locationText =
+          '${position!.latitude.toStringAsFixed(5)}, '
+          '${position!.longitude.toStringAsFixed(5)}';
     });
   }
 
+  // =========================
+  // 🖼️ PICK IMAGE
+  // =========================
   Future<void> pickImage() async {
-    final picked =
-        await ImagePicker().pickImage(source: ImageSource.gallery);
+    // Android 13+ system photo picker needs no permission — launch directly.
+    // For Android 12 and below, request storage as a courtesy but don't block.
+    await Permission.storage.request();
 
-    if (picked != null) {
-      setState(() {
-        image = File(picked.path);
-      });
-    }
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (picked != null) setState(() => image = File(picked.path));
   }
 
+  // =========================
+  // 📤 SEND REPORT
+  // =========================
   void sendReport() async {
-    final deviceId = await AuthService.getDeviceId();
-
-    final report = {
-      "id": DateTime.now().millisecondsSinceEpoch.toString(),
-      "type": "REPORT",
-      "origin": "device",
-      "hopCount": 0,
-      "device_id": deviceId,
-      "data": {
-        "description": descController.text,
-        "location": locationText,
-        "lat": position?.latitude,
-        "lng": position?.longitude,
-        "image": image?.path,
-      }
-    };
-
-    final msg = {
-      "report_type": "OTHER",
-      "description": descController.text,
-      "latitude": position?.latitude,
-      "longitude": position?.longitude,
-      "urgency_level": "MEDIUM",
-      "sent_mode": isOnline ? "INTERNET" : "MESH",
-      "device_id": deviceId,
-    };
-
     if (descController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -158,70 +145,100 @@ class _ReportScreenState extends State<ReportScreen> {
       return;
     }
 
+    final deviceId = await AuthService.getDeviceId();
+
+    // API-formatted payload
+    final msg = {
+      'report_type': 'OTHER',
+      'description': descController.text,
+      'latitude': position?.latitude,
+      'longitude': position?.longitude,
+      'urgency_level': 'MEDIUM',
+      'sent_mode': isOnline ? 'INTERNET' : 'MESH',
+      'device_id': deviceId,
+    };
+
+    // Mesh envelope (used if offline)
+    final meshMessage = {
+      'id': DateTime.now().millisecondsSinceEpoch.toString(),
+      'type': 'REPORT',
+      'origin': 'device',
+      'hopCount': 0,
+      'device_id': deviceId,
+      'payload': msg,
+      'data': {
+        'description': descController.text,
+        'location': locationText,
+        'lat': position?.latitude,
+        'lng': position?.longitude,
+        'image': image?.path,
+      },
+    };
+
     if (isOnline) {
+      // ── ONLINE PATH (unchanged) ──────────────────────────
       try {
         final response = await ApiService.reportIncident(msg);
-        print("Backend Response: $response");
 
         final reportData = response is Map ? response['report'] : null;
         final reportId = reportData is Map
-            ? (reportData['reportid'] ?? reportData['reportID'] ?? reportData['report_id'])?.toString()
+            ? (reportData['reportid'] ??
+                    reportData['reportID'] ??
+                    reportData['report_id'])
+                ?.toString()
             : null;
 
         if (image != null && reportId != null) {
           try {
-            final photoResponse = await ApiService.uploadReportPhoto(reportId, image!);
-            print('Photo upload response: $photoResponse');
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Report and photo uploaded successfully.'),
-                backgroundColor: Colors.green,
-              ),
+            await ApiService.uploadReportPhoto(reportId, image!);
+            _snack('Report and photo uploaded successfully.', Colors.green);
+          } catch (e) {
+            // Photo failed — still relay via mesh as fallback
+            await meshService.sendPayload(
+              meshMessage: meshMessage,
+              apiPayload: msg,
             );
-          } catch (e, stackTrace) {
-            wifiService.sendMessage(jsonEncode(report), "device");
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                    'Report created, but photo upload failed. Report saved to mesh.'),
-                backgroundColor: Colors.orange,
-              ),
+            _snack(
+              'Report created, but photo upload failed. Saved to mesh.',
+              Colors.orange,
             );
-            print("Photo upload error: $e");
-            print(stackTrace);
           }
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Report submitted to the server.'),
-              backgroundColor: Colors.green,
-            ),
-          );
+          _snack('Report submitted to the server.', Colors.green);
         }
-      } catch (e, stackTrace) {
-        wifiService.sendMessage(jsonEncode(report), "device");
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-                'Unable to send to backend. Report saved to mesh and will retry when online.'),
-            backgroundColor: Colors.orange,
-          ),
+      } catch (e) {
+        // Full request failed — fall back to mesh
+        await meshService.sendPayload(
+          meshMessage: meshMessage,
+          apiPayload: msg,
         );
-        print("Error sending report: $e");
-        print(stackTrace);
+        _snack(
+          'Unable to reach server. Report saved to mesh and will retry when online.',
+          Colors.orange,
+        );
       }
     } else {
-      wifiService.sendMessage(jsonEncode(report), "device");
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-              'No internet connection. Report queued to mesh for delivery.'),
-          backgroundColor: Colors.orange,
-        ),
+      // ── OFFLINE PATH — mesh only ──────────────────────────
+      await meshService.sendPayload(
+        meshMessage: meshMessage,
+        apiPayload: msg,
+      );
+      _snack(
+        'No internet. Report queued to mesh for delivery.',
+        Colors.orange,
       );
     }
   }
 
+  void _snack(String text, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), backgroundColor: color),
+    );
+  }
+
+  // =========================
+  // 🎨 BUILD
+  // =========================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -241,29 +258,30 @@ class _ReportScreenState extends State<ReportScreen> {
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
-                    isOnline ? 'Internet connected' : 'Offline - mesh fallback',
-                    style: const TextStyle(fontSize: 12, color: Colors.white70),
+                    isOnline
+                        ? 'Internet connected'
+                        : 'Offline - mesh fallback',
+                    style:
+                        const TextStyle(fontSize: 12, color: Colors.white70),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                if (!isOnline && wifiService.connectedPeers > 0) ...[
+                if (!isOnline && meshService.connectedPeers > 0) ...[
                   const SizedBox(width: 8),
-                  Icon(
-                    Icons.link,
-                    size: 16,
-                    color: Colors.cyanAccent,
-                  ),
+                  const Icon(Icons.link, size: 16, color: Colors.cyanAccent),
                   const SizedBox(width: 4),
                   Flexible(
                     child: Text(
-                      '${wifiService.connectedPeers} mesh peer${wifiService.connectedPeers == 1 ? '' : 's'}',
-                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      '${meshService.connectedPeers} mesh '
+                      'peer${meshService.connectedPeers == 1 ? '' : 's'}',
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.white70),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ],
               ],
-            )
+            ),
           ],
         ),
       ),
@@ -271,7 +289,7 @@ class _ReportScreenState extends State<ReportScreen> {
         padding: const EdgeInsets.all(12),
         child: Column(
           children: [
-            // 📍 Location
+            // 📍 Location row
             Row(
               children: [
                 const Icon(Icons.location_on),
@@ -288,7 +306,8 @@ class _ReportScreenState extends State<ReportScreen> {
                       ? const SizedBox(
                           height: 18,
                           width: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                          child:
+                              CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.refresh),
                   onPressed: isLocating ? null : refreshLocation,
@@ -298,25 +317,25 @@ class _ReportScreenState extends State<ReportScreen> {
 
             TextField(
               controller: descController,
-              decoration: InputDecoration(labelText: "Description"),
+              decoration:
+                  const InputDecoration(labelText: 'Description'),
               maxLines: 3,
             ),
 
-            SizedBox(height: 10),
+            const SizedBox(height: 10),
 
             ElevatedButton(
               onPressed: pickImage,
-              child: Text("Attach Image"),
+              child: const Text('Attach Image'),
             ),
 
-            if (image != null)
-              Image.file(image!, height: 100),
+            if (image != null) Image.file(image!, height: 100),
 
-            SizedBox(height: 20),
+            const SizedBox(height: 20),
 
             ElevatedButton(
               onPressed: sendReport,
-              child: Text("Submit"),
+              child: const Text('Submit'),
             ),
           ],
         ),

@@ -34,17 +34,19 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  flutter_blue_plus: ^2.2.1
-  permission_handler: ^12.0.1
-  flutter_ble_peripheral: ^2.1.0
   network_info_plus: ^8.0.0
-  connectivity_plus: ^7.1.1
   http: ^1.6.0
   geolocator: ^14.0.1
   geocoding: ^4.0.0
   image_picker: ^1.2.1
   shared_preferences: ^2.2.2
-
+  flutter_blue_plus: ^1.31.0 # BLE central (scanning + GATT)
+  flutter_ble_peripheral: ^2.0.0 # BLE peripheral (advertising)
+  connectivity_plus: ^5.0.0 # Internet detection
+  permission_handler: ^11.0.0
+  flutter_map: ^7.0.0
+  latlong2: ^0.9.1
+  flutter_p2p_connection: ^3.0.3
 dev_dependencies:
   flutter_test:
     sdk: flutter
