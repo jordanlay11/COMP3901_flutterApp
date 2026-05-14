@@ -1,50 +1,28 @@
-## For gradle errors run:
+## Project Description
 
+This project is an offline-capable emergency response application built with Flutter and Dart that enables users to send SOS alerts and incident reports even when internet connectivity is unavailable during disasters such as hurricanes. The system uses a hybrid mesh networking architecture combining BLE for device discovery and WiFi Direct for peer-to-peer data transfer, allowing nearby devices to relay emergency messages through the network until connectivity is restored. The application supports offline queueing, automatic synchronization, GPS location integration, authentication, and backend communication through Flask APIs, providing a resilient platform for emergency communication in low-connectivity environments.
+
+## Setup instructions
+
+You will need android studios and flutter installed and configured/added to path on your laptop
+Connect laptop to android phone using USB(enable usb debugging on device in developer mode)
+Give laptop permission to do usb debugging on phone when prompted(immediately after connecting USB)
+In your terminal run:
 flutter clean
 flutter pub get
-
-## Packages that might be needed:
-
-flutter pub add flutter_blue_plus # BLE (did)
-flutter pub add permission_handler (did)
-flutter pub add flutter_ble_peripheral # advertising (did)
-flutter pub add network_info_plus # IP info
-flutter pub add wifi_iot # WiFi/hotspot control
-flutter pub add connectivity_plus http
-
-## Check if phone is connected
-
-flutter devices
-
-## Build APK, Install on phone, Launch app
-
 flutter run
+These commands should install app on your phone.
 
-## reconnect device
+In a seperate terminal:(you will need to install python and add it to path)
+cd flask-backend
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r requirements.txt
+python app.py
+These command should start backend server on your device.
 
-flutter attach
-
-## Replace in wifi service to upload online when me done(line 197)
-
-Uri.parse("https://your-server.com/api/report")
-
----
-
-## 📌 What should be working(needs testing)
-
-BLE discovers nearby devices
-Devices auto-connect over WiFi
-Messages relay across devices (multi-hop mesh)
-Works offline (stores + forwards messages)
-Auto-uploads when internet is available
-
-How to test
-On Device A: Server → Advertise
-On Device B: Server → Scan
-Send message → should appear on both
-
-Add Device C → test multi-hop
-Turn off connections → send → reconnect → message delivers
-
-Note
-Devices must be on same WiFi for now
+You will need postgresql install and configures on your device.
+The database schema is in /flask-backend.
+Create the database and create the tables using the schema.
+Rename .env.sameple to .env in /flask-backend
+Them fill out the .env file with your database credentials and a JWT secret.

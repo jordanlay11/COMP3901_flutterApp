@@ -9,26 +9,19 @@ import 'package:permission_handler/permission_handler.dart';
 import 'api_service.dart';
 import 'auth_service.dart';
 
-// ============================================================
-// 🕸️ MESH SERVICE
-//
-// Role assignment: DYNAMIC (scan-first)
-//   1. On start, scan for an existing host for up to
-//      kRoleDecisionTimeout seconds.
+enum MeshRole { searching, host, client }
+// Brief description of the mesh service workflow and role decision logic:
+//   1. On start, scan for an existing host for up to kRoleDecisionTimeout seconds.
 //   2. If a host is found → become CLIENT and connect.
 //   3. If no host found → become HOST.
-//   4. Every kRescanInterval seconds, if peer count drops
-//      to 0, tear down current role and rescan so devices
-//      can reconnect after going out of range.
-// ============================================================
+//   4. Every kRescanInterval seconds, if peer count drops to 0, tear down current role and rescan so device can reconnect after going out of range.
 
-enum MeshRole { searching, host, client }
 
-/// How long to scan before deciding to become host (seconds).
-const int kRoleDecisionTimeout = 15;
+const int kRoleDecisionTimeout = 15; // How long to scan before deciding to become host (seconds).
+const int kRescanInterval = 30; // How often to check if peers dropped and rescan (seconds).
 
-/// How often to check if peers dropped and rescan (seconds).
-const int kRescanInterval = 30;
+// Minimum seconds the hotspot must be inactive before wetreat it as a real disconnect. Prevents reacting to brief  state flickers during credential exchange.
+const int kDisconnectDebounceSeconds = 6;
 
 class MeshService {
   bool _started = false;
@@ -38,26 +31,23 @@ class MeshService {
   bool isOnline = false;
   String? _deviceId;
 
-  // ── flutter_p2p_connection instances ──────────────────────
   FlutterP2pHost? _host;
   FlutterP2pClient? _client;
 
-  // ── Peer tracking ──────────────────────────────────────────
   final Set<String> _connectedPeers = {};
   int get connectedPeers => _connectedPeers.length;
 
   final Set<String> _scannedDevices = {};
   int _lastLoggedPeerCount = -1;
 
-  // ── Upload queue ───────────────────────────────────────────
+  // Upload queue
   final List<Map<String, dynamic>> _uploadQueue = [];
   int get uploadQueueLength => _uploadQueue.length;
 
-  // ── BLE outbox (messages pending WiFi Direct delivery) ─────
+  //BLE outbox (messages pending WiFi Direct delivery)
   final List<Map<String, dynamic>> _bleOutbox = [];
   int get bleQueueLength => _bleOutbox.length;
 
-  // ── Logs & streams ─────────────────────────────────────────
   final List<String> logs = [];
 
   final StreamController<bool> _connectivityController =
@@ -75,9 +65,10 @@ class MeshService {
   StreamSubscription? _receivedTextSub;
   Timer? _rescanTimer;
 
-  // =========================
-  // 🚀 START
-  // =========================
+  // Debounce timer — prevents reacting to brief hotspot flickers
+  Timer? _disconnectDebounce;
+
+  // START MESH SERVICE
   Future<void> start({Function(String)? onLog}) async {
     if (_started) return;
     _started = true;
@@ -85,14 +76,12 @@ class MeshService {
     _deviceId = await AuthService.getDeviceId();
     _log('Mesh starting — device: $_deviceId', onLog);
 
-    // Monitor internet
     _connectivitySub =
         Connectivity().onConnectivityChanged.listen((result) async {
       final online = result != ConnectivityResult.none;
       final wasOnline = isOnline;
       isOnline = online;
       _connectivityController.add(online);
-
       if (!wasOnline && online) {
         _log('🌐 Internet restored — flushing upload queue', onLog);
         await _flushUploadQueue(onLog: onLog);
@@ -109,14 +98,7 @@ class MeshService {
     await _decideRoleAndStart(onLog: onLog);
   }
 
-  // =========================
-  // 🎯 SCAN-FIRST ROLE DECISION
-  // Spins up a temporary client scan for kRoleDecisionTimeout
-  // seconds. If any host is discovered → stay client and
-  // connect. If timeout expires with no host → become host.
-  // =========================
   Future<void> _decideRoleAndStart({Function(String)? onLog}) async {
-    // Always need a client instance to scan, even if we end up as host
     _client = FlutterP2pClient();
     await _requestPermissions(p2p: _client!, onLog: onLog);
     await _client!.initialize();
@@ -132,9 +114,7 @@ class MeshService {
 
     bool hostFound = false;
     BleDiscoveredDevice? foundDevice;
-
-    // Scan with a completer so we can break out early on first host found
-    final completer = Completer<void>();
+    final completer = Completer<void>(); // Scan with completer to break out early on first host found
 
     await _client!.startScan((List<BleDiscoveredDevice> devices) {
       if (hostFound) return;
@@ -163,47 +143,34 @@ class MeshService {
       _log('👑 No host found — becoming HOST', onLog);
       _isHost = true;
       meshRole = MeshRole.host;
-      // Dispose the temp client before becoming host
       try { _client?.dispose(); } catch (_) {}
       _client = null;
       await _becomeHost(onLog: onLog);
     }
 
-    // Start periodic rescan — reconnects if peers drop
     _startRescanTimer(onLog: onLog);
   }
 
-  // =========================
-  // ♻️ RESCAN TIMER
-  // Every kRescanInterval seconds, if no peers are connected,
-  // tear down and re-run role decision so devices can find
-  // each other again after disconnection or app restart.
-  // =========================
+  // RESCAN TIMER Only runs when peers have been at 0 for a full interval.
+
   void _startRescanTimer({Function(String)? onLog}) {
     _rescanTimer?.cancel();
     _rescanTimer = Timer.periodic(
       Duration(seconds: kRescanInterval),
       (_) async {
-        if (_connectedPeers.isNotEmpty) return; // still connected, skip
-        _log('♻️ No peers — re-running role decision...', onLog);
-        await _tearDownRole();
-        _scannedDevices.clear();
-        _lastLoggedPeerCount = -1;
-        await _decideRoleAndStart(onLog: onLog);
+        if (_connectedPeers.isNotEmpty) return;
+        _log('♻️ No peers for ${kRescanInterval}s — re-running role decision...', onLog);
+        await _rescanNow(onLog: onLog);
       },
     );
   }
 
-  // =========================
   // 👑 BECOME HOST
-  // =========================
   Future<void> _becomeHost({Function(String)? onLog}) async {
     _host = FlutterP2pHost();
 
     try {
-      // Request permissions BEFORE initialize()
       await _requestPermissions(p2p: _host!, onLog: onLog);
-
       await _host!.initialize();
 
       final wifiOn = await _host!.checkWifiEnabled();
@@ -218,19 +185,31 @@ class MeshService {
       if (groupState.failureReason != null) {
         _log('⚠️ Group failure: ${groupState.failureReason}', onLog);
       }
-
       _log('✅ Host started — advertising via BLE', onLog);
 
-      // Stream hotspot state — only log when active state changes
-      // Also trigger immediate rescan if group drops (e.g. WiFi change)
+      // Debounced hotspot state — ignore brief flickers during handshake
       bool _lastHostActive = false;
       _hotspotSub = _host!.streamHotspotState().listen((state) {
         if (state.isActive != _lastHostActive) {
           _lastHostActive = state.isActive;
           _log('📶 Hotspot active: ${state.isActive}', onLog);
+
           if (!state.isActive && _started) {
-            _log('⚠️ Group lost — re-scanning immediately', onLog);
-            _rescanNow(onLog: onLog);
+            // Wait kDisconnectDebounceSeconds before acting — if it comes
+            // back up within that window (credential exchange) we ignore it.
+            _disconnectDebounce?.cancel();
+            _disconnectDebounce = Timer(
+              Duration(seconds: kDisconnectDebounceSeconds),
+              () {
+                if (!_lastHostActive && _started) {
+                  _log('⚠️ Group lost (confirmed) — re-scanning', onLog);
+                  _rescanNow(onLog: onLog);
+                }
+              },
+            );
+          } else {
+            // Came back up — cancel any pending rescan
+            _disconnectDebounce?.cancel();
           }
         }
       });
@@ -247,7 +226,6 @@ class MeshService {
         }
       });
 
-      // Listen for incoming text messages from clients
       _receivedTextSub = _host!.streamReceivedTexts().listen((text) {
         _log('📥 Received from client', onLog);
         _handleReceivedText(text, onLog: onLog);
@@ -257,27 +235,32 @@ class MeshService {
     }
   }
 
-  // =========================
-  // 📱 BECOME CLIENT
-  // Connects to already-discovered host (initialDevice),
-  // then keeps scanning for additional peers.
-  // =========================
+  // BECOME CLIENT
   Future<void> _becomeClient({
     required BleDiscoveredDevice initialDevice,
     Function(String)? onLog,
   }) async {
-    // _client already initialized in _decideRoleAndStart
     try {
-
-      // Stream hotspot/connection state — only log transitions
+      // Debounced hotspot state — same logic as host side
       bool _lastClientActive = false;
       _hotspotSub = _client!.streamHotspotState().listen((state) {
         if (state.isActive != _lastClientActive) {
           _lastClientActive = state.isActive;
           _log('📶 Client connected to group: ${state.isActive}', onLog);
+
           if (!state.isActive && _started) {
-            _log('⚠️ Disconnected from group — re-scanning immediately', onLog);
-            _rescanNow(onLog: onLog);
+            _disconnectDebounce?.cancel();
+            _disconnectDebounce = Timer(
+              Duration(seconds: kDisconnectDebounceSeconds),
+              () {
+                if (!_lastClientActive && _started) {
+                  _log('⚠️ Disconnected (confirmed) — re-scanning', onLog);
+                  _rescanNow(onLog: onLog);
+                }
+              },
+            );
+          } else {
+            _disconnectDebounce?.cancel();
           }
         }
       });
@@ -294,34 +277,22 @@ class MeshService {
         }
       });
 
-      // Listen for text received from host
       _receivedTextSub = _client!.streamReceivedTexts().listen((text) {
         _log('📥 Received from host', onLog);
         _handleReceivedText(text, onLog: onLog);
       });
 
-      // Connect to the host we already found during role decision
+      // Connect to the host found during role decision, and restart scanning after connecting — BLE and WiFi Direct share the radio. Scanning while connected causes the drop.
       await _connectToHost(initialDevice, onLog: onLog);
 
-      // Keep scanning for additional hosts (multi-hop future support)
-      await _client!.startScan((List<BleDiscoveredDevice> devices) {
-        for (final d in devices) {
-          final addr = d.deviceAddress ?? d.deviceName ?? 'unknown';
-          if (_scannedDevices.contains(addr)) continue;
-          _scannedDevices.add(addr);
-          _log('🤝 Found additional host: ${d.deviceName} ($addr)', onLog);
-          _connectToHost(d, onLog: onLog);
-        }
-      });
-
-      _log('✅ Client scan started', onLog);
+      _log('✅ Client connected — scan stopped to maintain link', onLog);
     } catch (e) {
       _log('❌ Client start error: $e', onLog);
     }
   }
 
   // =========================
-  // 🔗 CONNECT CLIENT TO HOST
+  // 🔗 CONNECT TO HOST
   // =========================
   Future<void> _connectToHost(
     BleDiscoveredDevice device, {
@@ -332,8 +303,7 @@ class MeshService {
     try {
       _log('🔗 Connecting to ${device.deviceName}...', onLog);
 
-      // Stop scan before connecting — prevents "scanning too frequently"
-      // error during the WiFi Direct handshake.
+      // Scan must be stopped before connecting — sharing the radio during handshake causes connection to dropping immediately after being established.
       await _client!.stopScan();
 
       await _client!.connectWithDevice(device);
@@ -342,33 +312,18 @@ class MeshService {
       await _flushBleOutbox(onLog: onLog);
     } catch (e) {
       _log('❌ Connect error: $e', onLog);
-      // Remove from scanned so we can retry this device
       _scannedDevices.remove(device.deviceAddress ?? device.deviceName);
-      // Wait before restarting scan to respect Android's rate limit
-      await Future.delayed(const Duration(seconds: 30));
-      _log('🔍 Restarting scan after failure...', onLog);
-      await _client!.startScan((List<BleDiscoveredDevice> devices) {
-        for (final d in devices) {
-          final addr = d.deviceAddress ?? d.deviceName ?? 'unknown';
-          if (_scannedDevices.contains(addr)) continue;
-          _scannedDevices.add(addr);
-          _log('🤝 Found host via BLE: ${d.deviceName} ($addr)', onLog);
-          _connectToHost(d, onLog: onLog);
-        }
-      });
+      // Don't immediately retry — let the rescan timer handle it to avoid a rapid-retry loop that keeps dropping the connection.
+      _log('⏳ Will retry via rescan timer in ${kRescanInterval}s', onLog);
     }
   }
 
-  // =========================
   // 📤 SEND PAYLOAD
-  // Called by report_screen and sos_screen.
-  // =========================
   Future<void> sendPayload({
     required Map<String, dynamic> meshMessage,
     required Map<String, dynamic> apiPayload,
     Function(String)? onLog,
   }) async {
-    // Always queue for API upload
     _uploadQueue.add(apiPayload);
 
     if (isOnline) {
@@ -377,17 +332,12 @@ class MeshService {
       return;
     }
 
-    // Offline — send via WiFi Direct mesh
     _bleOutbox.add(meshMessage);
     _log('📡 Queued for mesh delivery (${_bleOutbox.length} pending)', onLog);
-
     await _flushBleOutbox(onLog: onLog);
   }
 
-  // =========================
-  // 📤 FLUSH BLE OUTBOX
-  // Sends queued messages over WiFi Direct to peers.
-  // =========================
+  // 📤 FLUSH BLE QUEUE(send messages)
   Future<void> _flushBleOutbox({Function(String)? onLog}) async {
     if (_bleOutbox.isEmpty) return;
 
@@ -399,11 +349,9 @@ class MeshService {
 
       try {
         if (_isHost && _host != null && _connectedPeers.isNotEmpty) {
-          // Host broadcasts to all clients
           await _host!.broadcastText(text);
           sent = true;
         } else if (!_isHost && _client != null && _connectedPeers.isNotEmpty) {
-          // Client sends text to host
           await _client!.broadcastText(text);
           sent = true;
         }
@@ -418,21 +366,17 @@ class MeshService {
     }
   }
 
-  // =========================
-  // 📩 HANDLE RECEIVED TEXT
-  // =========================
+  // HANDLE RECEIVED REPORT/SOS
   void _handleReceivedText(String text, {Function(String)? onLog}) {
     try {
       final data = jsonDecode(text) as Map<String, dynamic>;
       final type = data['type'] ?? 'UNKNOWN';
       _log('📥 Processing received $type', onLog);
 
-      // Reconstruct API payload
       final inner = data['payload'];
       if (inner is Map<String, dynamic>) {
         _uploadQueue.add(inner);
       } else {
-        // Fallback: build minimal payload from envelope
         _uploadQueue.add({
           'report_type': type == 'SOS' ? 'SOS' : 'OTHER',
           'description': type == 'SOS'
@@ -455,9 +399,7 @@ class MeshService {
     }
   }
 
-  // =========================
-  // ☁️ FLUSH UPLOAD QUEUE
-  // =========================
+  // FLUSH UPLOAD QUEUE
   Future<void> _flushUploadQueue({Function(String)? onLog}) async {
     if (_uploadQueue.isEmpty || !isOnline) return;
 
@@ -477,26 +419,19 @@ class MeshService {
     }
   }
 
-  // =========================
-  // 🔐 PERMISSIONS
-  // Uses permission_handler directly so we control exactly
-  // which permissions are requested and can log each result.
-  // Android 14 (API 34) requires all of these to be granted
-  // at runtime before flutter_p2p_connection will work.
-  // =========================
+  // PERMISSIONS
   Future<void> _requestPermissions({
     required dynamic p2p,
     Function(String)? onLog,
   }) async {
-    // Core permissions needed on all supported Android versions
     final permissions = [
-      Permission.location,              // BLE scan + WiFi Direct
-      Permission.locationWhenInUse,     // Required on Android 14
-      Permission.bluetoothScan,         // BLE scanning (API 31+)
-      Permission.bluetoothConnect,      // BLE connect (API 31+)
-      Permission.bluetoothAdvertise,    // BLE advertising (API 31+)
-      Permission.nearbyWifiDevices,     // WiFi Direct (API 33+)
-      Permission.storage,               // File transfer support
+      Permission.location,
+      Permission.locationWhenInUse,
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.bluetoothAdvertise,
+      Permission.nearbyWifiDevices,
+      Permission.storage,
     ];
 
     for (final perm in permissions) {
@@ -517,13 +452,10 @@ class MeshService {
           _log('❌ Denied: $perm → $result', onLog);
         }
       } catch (e) {
-        // Some permissions don't exist on older API levels — skip silently
         _log('⚠️ Permission not applicable: $perm', onLog);
       }
     }
 
-    // Also call the plugin's own checker so it registers the grant
-    // internally — but only after we've already requested via handler.
     try {
       if (!await p2p.checkP2pPermissions()) {
         _log('⚠️ P2P permission still missing after request', onLog);
@@ -538,25 +470,23 @@ class MeshService {
     _log('🔐 Permission check complete', onLog);
   }
 
-  // =========================
-  // ⚡ RESCAN NOW
-  // Triggered immediately on disconnection rather than
-  // waiting for the 30-second timer.
-  // =========================
+  // RESCAN NOW
+  // Schedules teardown on the next event loop tick so we never call it from inside a stream listener (avoids dispose-while-listening crashes and credential timeout errors).
   Future<void> _rescanNow({Function(String)? onLog}) async {
-    _rescanTimer?.cancel();
-    await _tearDownRole();
-    _scannedDevices.clear();
-    _lastLoggedPeerCount = -1;
-    meshRole = MeshRole.searching;
-    await _decideRoleAndStart(onLog: onLog);
-    _startRescanTimer(onLog: onLog);
+    // Schedule asynchronously — never tear down from inside a listener
+    Future.microtask(() async {
+      _rescanTimer?.cancel();
+      _disconnectDebounce?.cancel();
+      await _tearDownRole();
+      _scannedDevices.clear();
+      _lastLoggedPeerCount = -1;
+      meshRole = MeshRole.searching;
+      await _decideRoleAndStart(onLog: onLog);
+      _startRescanTimer(onLog: onLog);
+    });
   }
 
-  // =========================
-  // 🔄 TEAR DOWN CURRENT ROLE
-  // Called before re-running role decision on rescan.
-  // =========================
+  // TEAR DOWN CURRENT ROLE
   Future<void> _tearDownRole() async {
     await _hotspotSub?.cancel();
     await _clientSub?.cancel();
@@ -578,20 +508,17 @@ class MeshService {
     } catch (_) {}
   }
 
-  // =========================
-  // 🛑 STOP
-  // =========================
+  // STOP
   Future<void> stop() async {
     _rescanTimer?.cancel();
+    _disconnectDebounce?.cancel();
     await _tearDownRole();
     await _connectivitySub?.cancel();
     _scannedDevices.clear();
     _started = false;
   }
 
-  // =========================
-  // 📝 LOGGER
-  // =========================
+  // LOGGER
   void _log(String msg, Function(String)? external) {
     logs.add(msg);
     _logController.add(msg);
